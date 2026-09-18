@@ -18,13 +18,19 @@ class CrossfadeTest : public QObject {
   QTemporaryDir music;
   QStringList files;
 
-  // Short recordings, so a transition arrives inside a test's patience.
-  bool encode(const QString &name, const QString &title, int seconds) {
+  // Short recordings, so a transition arrives inside a test's patience. A tone
+  // rather than silence where the meters have to see something.
+  bool encode(const QString &name, const QString &title, int seconds, int hertz = 0) {
+    const QString source = hertz > 0
+                               ? QString("sine=frequency=%1:sample_rate=44100:duration=%2").arg(hertz).arg(seconds)
+                               : "anullsrc=r=44100:cl=mono";
+    QStringList arguments{"-nostdin", "-v", "error", "-f", "lavfi", "-i", source};
+    if (hertz <= 0)
+      arguments << "-t" << QString::number(seconds);
+    arguments << "-metadata" << ("title=" + title) << "-metadata" << "artist=Fixture artist"
+              << "-metadata" << "album=Handover" << music.filePath(name);
     QProcess run;
-    run.start("ffmpeg", {"-nostdin", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
-                         "-t", QString::number(seconds), "-metadata", "title=" + title,
-                         "-metadata", "artist=Fixture artist", "-metadata", "album=Handover",
-                         music.filePath(name)});
+    run.start("ffmpeg", arguments);
     return run.waitForFinished(20000) && run.exitCode() == 0;
   }
 
@@ -58,6 +64,8 @@ private slots:
                             .dir().absoluteFilePath("../helper/catalog.py");
     qputenv("SUNG_HELPER", helper.toUtf8());
     qputenv("SUNG_PYTHON", "/usr/bin/python3");
+    QVERIFY(encode("tone one.flac", "Tone one", 5, 330));
+    QVERIFY(encode("tone two.flac", "Tone two", 6, 220));
     QVERIFY(encode("01 first.flac", "First", 4));
     QVERIFY(encode("02 second.flac", "Second", 6));
     QVERIFY(encode("03 third.flac", "Third", 6));
@@ -226,6 +234,11 @@ private slots:
     QTRY_VERIFY_WITH_TIMEOUT(!b->importingLocal(), 20000);
     b->library("files");
     b->setCrossfadeSeconds(2);
+    // Settings outlive a Backend within one process, so this test states the
+    // ones it depends on rather than inheriting whatever ran before it.
+    b->setRepeat(0);
+    b->setShuffle(false);
+    b->setGapless(true);
     b->enqueueItems(b->results()->rows);
     b->playAt(0);
     QTRY_VERIFY_WITH_TIMEOUT(b->playing() && b->duration() > 0, 10000);
@@ -322,6 +335,54 @@ private slots:
     QTRY_VERIFY_WITH_TIMEOUT(b->currentIndex() != 0, 10000);
     QCOMPARE(b->currentIndex(), decided);
     b->setShuffle(false);
+    b->stop();
+  }
+
+  // The decoded-audio meters are fed by a tap on the player. Only the deck
+  // being heard may carry one: a tap left on the idle deck starves the active
+  // one, and the meters die. So the tap has to move with the swap.
+  void theMetersFollowTheSwap() {
+    auto b = std::make_unique<Backend>();
+    b->setVolume(0.5);
+    b->setLyricsFallback(false);
+    b->setAutoplay(false);
+    b->setWatchMusicFolders(false);
+    b->setOnlineArtwork(false);
+    b->setPrepareNext(false);
+    b->setMotion(true);
+    b->setUiActive(true);
+    b->clearQueue();
+    b->importLocalFiles({QUrl::fromLocalFile(music.filePath("tone one.flac")),
+                         QUrl::fromLocalFile(music.filePath("tone two.flac"))});
+    QTRY_VERIFY_WITH_TIMEOUT(!b->importingLocal(), 20000);
+    b->library("files");
+    // Earlier cases in this process have imported their own fixtures, so the
+    // two tones are picked out by name rather than by being all there is.
+    QVariantList tones;
+    for (const auto &row : b->results()->rows)
+      if (row.toMap().value("title").toString().startsWith("Tone "))
+        tones.append(row);
+    QCOMPARE(tones.size(), 2);
+    b->setCrossfadeSeconds(2);
+    b->enqueueItems(tones);
+    QCOMPARE(b->queue()->count(), 2);
+    b->playAt(0);
+    QTRY_VERIFY_WITH_TIMEOUT(b->playing() && b->duration() > 0, 10000);
+    const auto loud = [&b] {
+      for (const auto &level : b->audioLevels())
+        if (level.toDouble() > 0.05)
+          return true;
+      return false;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(loud(), 10000);
+    const int deckBefore = b->m_usingB ? 1 : 0;
+    QTRY_VERIFY_WITH_TIMEOUT(b->currentIndex() != 0, 20000);
+    QVERIFY2(b->currentIndex() == 1,
+             qPrintable(QString("the next song took over, index %1").arg(b->currentIndex())));
+    QVERIFY2((b->m_usingB ? 1 : 0) != deckBefore, "the decks really did swap");
+    QVERIFY(b->playing());
+    // The tone on the other deck has to reach the meters just the same.
+    QTRY_VERIFY_WITH_TIMEOUT(loud(), 10000);
     b->stop();
   }
 

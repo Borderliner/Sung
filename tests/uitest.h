@@ -67,3 +67,6 @@ void runSingAlongTests(Backend*,QQuickWindow*);
 void runCrossfadeUiTests(Backend*,QQuickWindow*);
 void runTrackDetailsTests(Backend*,QQuickWindow*);
 void runQueueHistoryTests(Backend*,QQuickWindow*);
+void runListeningStatsTests(Backend*,QQuickWindow*);
+void runPlaylistVersionsTests(Backend*,QQuickWindow*);
+void runWindowWashTests(Backend*,QQuickWindow*);

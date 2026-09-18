@@ -655,6 +655,16 @@ void runSingAlongTests(Backend *b, QQuickWindow *w) {
           "the sung line is the one marked current");
   const double activeSize = current ? current->property("font").value<QFont>().pixelSize() : 0;
   c.check(activeSize >= 28, "it is set at display size");
+  // Emphasis is carried by scale, so no line ever re-shapes its text.
+  if (auto lineItem = current->parentItem()) {
+    c.check(qAbs(lineItem->scale() - 1) < 0.02, "the sung line is at full size");
+    if (auto other = shownItem(singAlong, "singAlongLine"))
+      if (auto otherLine = other->parentItem()) {
+        c.check(otherLine->scale() < 0.95, "and its neighbours stand back by scale");
+        c.check(qAbs(other->property("font").value<QFont>().pixelSize() - activeSize) < 0.01,
+                "at the same font size, so changing line re-shapes nothing");
+      }
+  }
   // Even a four-line lyric brings its live line to where the eye is looking,
   // rather than leaving it stranded at the top of the view.
   if (current) {
@@ -669,13 +679,45 @@ void runSingAlongTests(Backend *b, QQuickWindow *w) {
   auto fill = anyItem(singAlong, "singAlongFill");
   c.check(fill, "the sung line carries a fill");
   const double halfway = fill ? fill->width() : 0;
+
+  // And it sweeps between playback reports rather than stepping with them.
+  // Playback reports itself four times a second; sampled faster than that, the
+  // fill has to keep moving in between.
+  b->seek(11000);
+  c.check(c.until([&] { return b->lyricIndex() == 0 && b->playing(); }, 3000),
+          "the first line is being sung");
+  QTest::qWait(300);
+  int advances = 0;
+  double previous = fill ? fill->width() : 0;
+  for (int i = 0; i < 40; ++i) {
+    QTest::qWait(25);
+    const double now = fill ? fill->width() : 0;
+    if (now > previous + 0.05)
+      ++advances;
+    previous = now;
+  }
+  // Four reports a second over a second of sampling would give at most ~4
+  // steps; a sweep moves on nearly every frame.
+  c.check(advances >= 12,
+          QString("the fill sweeps rather than stepping (%1 advances in 40 samples)").arg(advances));
+  c.shot("02-singalong-line-filling");
+
   b->seek(19000);
   c.check(c.until([&] { return b->lyricProgress() > 0.85; }, 3000), "playback nears the line's end");
   QTest::qWait(300);
   auto laterFill = anyItem(singAlong, "singAlongFill");
   c.check(laterFill && laterFill->width() > halfway,
           "the fill advances with the music, it does not merely appear");
-  c.shot("02-singalong-line-filling");
+
+  // Pausing stops the sweep where it stands rather than letting it run on.
+  b->pause();
+  QTest::qWait(400);
+  const double held = laterFill ? laterFill->width() : 0;
+  QTest::qWait(500);
+  c.check(laterFill && qAbs(laterFill->width() - held) < 1.0,
+          "a paused song holds its fill still");
+  b->play();
+  c.check(c.until([&] { return b->playing(); }, 5000), "and playing resumes it");
 
   b->seek(35000);
   c.check(c.until([&] { return b->lyricIndex() == 2; }, 3000), "a later line takes over");
@@ -1037,6 +1079,469 @@ void runQueueHistoryTests(Backend *b, QQuickWindow *w) {
 
   w->setProperty("queueTab", "next");
   w->setProperty("side", "");
+  b->stop();
+  b->clearQueue();
+  c.finish();
+}
+
+void runListeningStatsTests(Backend *b, QQuickWindow *w) {
+  Check c{b, w, qEnvironmentVariable("SUNG_TEST_OUTPUT")};
+  QDir().mkpath(c.directory + "/music");
+  QWindowSystemInterface::handleFocusWindowChanged(w);
+  w->resize(1320, 900);
+  QTest::qWait(500);
+  b->setTheme("dark");
+  b->setMotion(false);
+  b->setVolume(0);
+  b->setAutoplay(false);
+  b->setPrepareNext(false);
+  b->setWatchMusicFolders(false);
+  b->setOnlineArtwork(false);
+  b->setLyricsFallback(false);
+  b->setCrossfadeSeconds(0);
+  b->clearListeningStats();
+
+  // --- Nothing has been played ---
+  const auto empty = b->listeningStats(7);
+  c.check(empty.value("plays").toInt() == 0 && empty.value("seconds").toLongLong() == 0,
+          "an unused library has listened to nothing");
+  c.check(empty.value("topArtists").toList().isEmpty(), "and has no favourites yet");
+
+  paintCover(c.directory + "/music/cover.png", QColor("#26324f"), QColor("#e2a03f"));
+  // Two artists with different amounts of music, so the ranking has to think.
+  const QList<QPair<QString, QString>> fixtures{{"Harbour lights", "Marble Coast"},
+                                                {"Night ferry", "Marble Coast"},
+                                                {"The light arrives", "Rill"}};
+  for (int i = 0; i < fixtures.size(); ++i)
+    if (!encodeTrack(c, QString("%1/music/%2.flac").arg(c.directory).arg(i + 1),
+                     fixtures[i].first, "Still Water", fixtures[i].second, i + 1))
+      return c.finish();
+  b->importMusicFolder(QUrl::fromLocalFile(c.directory + "/music"));
+  c.check(c.until([&] { return !b->importingLocal(); }, 40000), "import the statistics fixture");
+  b->library("files");
+  c.check(c.until([&] { return b->results()->count() == 3; }), "three songs are available");
+  b->enqueueItems(b->results()->rows);
+
+  // --- Playing is counted, and counted per play rather than per song ---
+  QHash<QString, int> expectedPlays;
+  const auto playIndex = [&](int index) {
+    b->playAt(index);
+    c.check(c.until([&] { return b->playing() && b->currentIndex() == index; }, 10000),
+            QString("song %1 plays").arg(index));
+    QTest::qWait(250);
+    expectedPlays[b->current().value("artist").toString()] += 1;
+  };
+  // Marble Coast twice over, Rill once.
+  playIndex(0);
+  playIndex(1);
+  playIndex(2);
+  playIndex(0);
+  QTest::qWait(400);
+
+  const auto week = b->listeningStats(7);
+  c.check(week.value("plays").toInt() == 4, "every play is counted, not every song");
+  c.check(week.value("songs").toInt() == 3, "and the distinct songs are counted separately");
+  c.check(week.value("artists").toInt() == 2, "along with the artists behind them");
+  const qint64 expectedSeconds = 4 * 150;
+  c.check(week.value("seconds").toLongLong() == expectedSeconds,
+          QString("the time listened adds up (%1, expected %2)")
+              .arg(week.value("seconds").toLongLong()).arg(expectedSeconds));
+
+  // What was actually played: queue rows 0, 1, 2 and 0 again. The library
+  // decides its own order, so the expectations come from the queue.
+  const auto twice = b->queue()->get(0);
+  QHash<QString, int> playsByArtist;
+  for (int row : {0, 1, 2, 0})
+    playsByArtist[b->queue()->get(row).value("artist").toString()] += 1;
+  const auto topArtists = week.value("topArtists").toList();
+  c.check(topArtists.size() == playsByArtist.size(), "every artist played is ranked");
+  for (const auto &entry : topArtists) {
+    const auto artist = entry.toMap();
+    const int expected = playsByArtist.value(artist.value("name").toString());
+    c.check(artist.value("plays").toInt() == expected,
+            QString("%1 is credited with %2 plays, expected %3")
+                .arg(artist.value("name").toString()).arg(artist.value("plays").toInt()).arg(expected));
+  }
+  for (int i = 1; i < topArtists.size(); ++i)
+    c.check(topArtists[i - 1].toMap().value("seconds").toLongLong() >=
+                topArtists[i].toMap().value("seconds").toLongLong(),
+            "the ranking runs from most time listened to least");
+  const auto topSongs = week.value("topSongs").toList();
+  c.check(!topSongs.isEmpty() &&
+              topSongs[0].toMap().value("name").toString() == twice.value("title").toString(),
+          QString("the song played twice leads the songs (got %1, expected %2)")
+              .arg(topSongs.isEmpty() ? QString() : topSongs[0].toMap().value("name").toString(),
+                   twice.value("title").toString()));
+  c.check(!topSongs.isEmpty() && topSongs[0].toMap().value("plays").toInt() == 2,
+          "and its count is right");
+
+  // --- The period really narrows things ---
+  const auto allTime = b->listeningStats(0);
+  c.check(allTime.value("plays").toInt() == 4, "all time sees the same plays here");
+  c.check(allTime.value("daily").toList().isEmpty(),
+          "all time has no day-by-day shape to show");
+  const auto week2 = b->listeningStats(7);
+  c.check(week2.value("daily").toList().size() == 7, "a week is shown as seven days");
+  qint64 dailyTotal = 0;
+  for (const auto &row : week2.value("daily").toList())
+    dailyTotal += row.toMap().value("seconds").toLongLong();
+  c.check(dailyTotal == expectedSeconds, "the days add up to the period");
+
+  // --- A private session records nothing ---
+  const int before = b->listeningStats(0).value("plays").toInt();
+  b->setHistoryPaused(true);
+  playIndex(1);
+  QTest::qWait(400);
+  c.check(b->listeningStats(0).value("plays").toInt() == before,
+          "a paused history records no statistics either");
+  b->setHistoryPaused(false);
+
+  // --- The dialog ---
+  auto stats = c.dialog("listeningStatsDialog");
+  c.check(stats, "the statistics dialog opens");
+  if (!stats)
+    return c.finish();
+  auto time = shownItem(w->contentItem(), "statsTimeValue");
+  c.check(time && time->property("text").toString() == "10 min",
+          QString("the headline reads in minutes (%1)")
+              .arg(time ? time->property("text").toString() : QString()));
+  auto plays = shownItem(w->contentItem(), "statsPlaysValue");
+  c.check(plays && plays->property("text").toString() == "4", "and the play count is shown");
+  c.check(shownItem(w->contentItem(), "statsDaily"), "the week has a shape");
+  auto bars = shownItem(w->contentItem(), "statsDailyBars");
+  c.check(bars && bars->height() >= 56,
+          QString("the day bars keep their height (%1px)").arg(bars ? bars->height() : 0));
+  auto figure = shownItem(w->contentItem(), "statsTime");
+  c.check(figure && figure->height() >= 72,
+          QString("and the headline figures keep theirs (%1px)").arg(figure ? figure->height() : 0));
+  auto list = shownItem(w->contentItem(), "statsRankingList");
+  c.check(list && list->property("count").toInt() == 2, "the artists are ranked on screen");
+  // A count is not the same as being on screen: the figures above must not
+  // squeeze the ranking out of the dialog.
+  c.check(list && list->height() > 100,
+          QString("the ranking has room to be read (%1px)").arg(list ? list->height() : 0));
+  auto row = list ? anyItem(list, "statsRow_0") : nullptr;
+  c.check(row && row->width() > 200 && row->height() > 30, "and its rows have real size");
+  if (row) {
+    const auto centre = row->mapToScene(row->boundingRect().center());
+    c.check(centre.y() > 0 && centre.y() < w->height() && centre.x() > 0 && centre.x() < w->width(),
+            "and sit inside the window");
+  }
+  c.shot("01-listening-stats-artists");
+
+  // Switching the ranking switches what is listed.
+  stats->setProperty("ranking", "songs");
+  QTest::qWait(400);
+  c.check(list && list->property("count").toInt() == 3, "songs rank separately");
+  c.shot("02-listening-stats-songs");
+
+  // Switching the period re-reads the numbers.
+  stats->setProperty("days", 0);
+  QMetaObject::invokeMethod(stats, "refresh");
+  QTest::qWait(400);
+  c.check(!shownItem(w->contentItem(), "statsDaily"), "all time drops the day-by-day row");
+  c.shot("03-listening-stats-all-time");
+
+  // --- Clearing it empties it ---
+  b->clearListeningStats();
+  QTest::qWait(400);
+  c.check(b->listeningStats(0).value("plays").toInt() == 0, "clearing removes every play");
+  c.check(shownItem(w->contentItem(), "statsEmpty"), "and the dialog says so plainly");
+  c.shot("04-listening-stats-cleared");
+  c.closeDialog(stats);
+
+  b->stop();
+  b->clearQueue();
+  c.finish();
+}
+
+void runPlaylistVersionsTests(Backend *b, QQuickWindow *w) {
+  Check c{b, w, qEnvironmentVariable("SUNG_TEST_OUTPUT")};
+  QDir().mkpath(c.directory + "/music");
+  QWindowSystemInterface::handleFocusWindowChanged(w);
+  w->resize(1320, 900);
+  QTest::qWait(500);
+  b->setTheme("dark");
+  b->setMotion(false);
+  b->setVolume(0);
+  b->setAutoplay(false);
+  b->setPrepareNext(false);
+  b->setWatchMusicFolders(false);
+  b->setOnlineArtwork(false);
+
+  paintCover(c.directory + "/music/cover.png", QColor("#26324f"), QColor("#e2a03f"));
+  for (int i = 1; i <= 4; ++i)
+    if (!encodeTrack(c, QString("%1/music/%2.flac").arg(c.directory).arg(i),
+                     QString("Track %1").arg(i), "Versions", "Rill", i))
+      return c.finish();
+  b->importMusicFolder(QUrl::fromLocalFile(c.directory + "/music"));
+  c.check(c.until([&] { return !b->importingLocal(); }, 40000), "import the versions fixture");
+  b->library("files");
+  c.check(c.until([&] { return b->results()->count() == 4; }), "four songs are available");
+  const auto songs = b->results()->rows;
+
+  // --- A new playlist has no history ---
+  const auto playlist = b->createPlaylist("Evening drive");
+  c.check(b->playlistVersions(playlist).isEmpty(), "a new playlist has no earlier versions");
+
+  // --- Each edit puts the version it replaced aside ---
+  b->addItemsToPlaylist(playlist, {songs[0], songs[1]});
+  QTest::qWait(150);
+  auto versions = b->playlistVersions(playlist);
+  c.check(versions.size() == 1, "the first edit keeps the empty version it replaced");
+  c.check(versions[0].toMap().value("count").toInt() == 0, "which held nothing");
+
+  b->addItemsToPlaylist(playlist, {songs[2]});
+  QTest::qWait(150);
+  versions = b->playlistVersions(playlist);
+  c.check(versions.size() == 2, "a second edit keeps a second version");
+  c.check(versions[0].toMap().value("count").toInt() == 2,
+          "newest first, so the two-song version is at the top");
+  c.check(versions[0].toMap().value("summary").toString() == "2 songs", "and says so in words");
+  c.check(versions[1].toMap().value("count").toInt() == 0, "with the empty one below it");
+
+  b->openPlaylist(playlist);
+  c.check(c.until([&] { return b->results()->count() == 3; }), "the playlist holds three songs");
+  b->removePlaylistRows(playlist, {0});
+  QTest::qWait(150);
+  c.check(b->playlistVersions(playlist).size() == 3, "removing a song keeps a version too");
+  c.check(b->playlistVersions(playlist)[0].toMap().value("count").toInt() == 3,
+          "the version replaced held three");
+
+  // An edit that changes nothing is not a version.
+  const int before = b->playlistVersions(playlist).size();
+  b->addItemsToPlaylist(playlist, {songs[1]});
+  QTest::qWait(150);
+  c.check(b->playlistVersions(playlist).size() == before,
+          "adding a song that is already there keeps no new version");
+
+  // --- Restoring brings a shape back, including a song removed since ---
+  b->openPlaylist(playlist);
+  QTest::qWait(200);
+  const int current = b->results()->count();
+  c.check(b->restorePlaylistVersion(playlist, 0), "the newest version can be restored");
+  c.check(c.until([&] { return b->results()->count() == 3; }, 4000),
+          QString("restoring brings back the three songs (was %1)").arg(current));
+  QStringList restored;
+  for (const auto &row : b->results()->rows)
+    restored << row.toMap().value("id").toString();
+  c.check(restored.contains(songs[0].toMap().value("id").toString()),
+          "including the song that had been removed");
+
+  // Restoring is itself an edit, so it is in the history and can be undone.
+  c.check(b->playlistVersions(playlist).size() == before + 1,
+          "the restore kept the version it replaced");
+  b->undo();
+  QTest::qWait(250);
+  c.check(b->results()->count() == 2, "and ordinary Undo takes the restore back");
+
+  // Restoring what is already there changes nothing.
+  b->openPlaylist(playlist);
+  QTest::qWait(200);
+  const int versionsNow = b->playlistVersions(playlist).size();
+  const auto same = b->results()->rows;
+  b->restorePlaylistVersion(playlist, 0);
+  QTest::qWait(200);
+  c.check(b->playlistVersions(playlist).size() >= versionsNow, "history is never lost by a restore");
+
+  // --- Bounded, so history cannot grow without limit ---
+  for (int i = 0; i < 20; ++i) {
+    b->removePlaylistRows(playlist, {0});
+    b->addItemsToPlaylist(playlist, {songs[i % 4]});
+    QTest::qWait(20);
+  }
+  c.check(b->playlistVersions(playlist).size() <= 12,
+          QString("history is bounded (%1 versions)").arg(b->playlistVersions(playlist).size()));
+
+  // --- The dialog ---
+  QMetaObject::invokeMethod(w, "chooseLibrary", Q_ARG(QVariant, QVariant("playlists")));
+  QTest::qWait(400);
+  auto dialog = w->findChild<QObject *>("playlistVersionsDialog");
+  c.check(dialog, "the version history dialog exists");
+  if (dialog) {
+    QMetaObject::invokeMethod(dialog, "inspect", Q_ARG(QVariant, QVariant(playlist)),
+                              Q_ARG(QVariant, QVariant("Evening drive")));
+    QTest::qWait(500);
+    c.check(dialog->property("visible").toBool(), "it opens on a playlist");
+    auto list = shownItem(w->contentItem(), "playlistVersionsList");
+    c.check(list && list->property("count").toInt() > 0, "and lists its versions");
+    c.check(list && list->height() > 100, "with room to read them");
+    auto when = shownItem(w->contentItem(), "playlistVersionWhen_0");
+    c.check(when && when->property("text").toString().startsWith("Today"),
+            QString("a version made just now is dated today (%1)")
+                .arg(when ? when->property("text").toString() : QString()));
+    c.shot("01-playlist-versions");
+
+    // Restoring from the dialog changes the playlist.
+    b->openPlaylist(playlist);
+    QTest::qWait(300);
+    const int shown = b->results()->count();
+    const int wanted = b->playlistVersions(playlist)[0].toMap().value("count").toInt();
+    c.clickWithin(list, "restoreVersion_0");
+    c.check(c.until([&] { return b->results()->count() == wanted; }, 4000),
+            QString("restoring from the dialog reshapes the playlist (%1 to %2)")
+                .arg(shown).arg(wanted));
+    c.shot("02-playlist-versions-restored");
+
+    // Forgetting empties it.
+    c.click("clearPlaylistVersions");
+    c.check(c.until([&] { return b->playlistVersions(playlist).isEmpty(); }, 3000),
+            "versions can be forgotten");
+    c.check(shownItem(w->contentItem(), "playlistVersionsEmpty"), "and the dialog says so");
+    c.shot("03-playlist-versions-empty");
+    QMetaObject::invokeMethod(dialog, "close");
+    QTest::qWait(300);
+  }
+
+  // --- A deleted playlist takes its history with it ---
+  b->addItemsToPlaylist(playlist, {songs[3]});
+  QTest::qWait(150);
+  c.check(!b->playlistVersions(playlist).isEmpty(), "history starts again after an edit");
+  b->deletePlaylist(playlist);
+  QTest::qWait(200);
+  c.check(b->playlistVersions(playlist).isEmpty(), "deleting the playlist forgets its versions");
+
+  c.finish();
+}
+
+void runWindowWashTests(Backend *b, QQuickWindow *w) {
+  Check c{b, w, qEnvironmentVariable("SUNG_TEST_OUTPUT")};
+  QDir().mkpath(c.directory + "/music");
+  QWindowSystemInterface::handleFocusWindowChanged(w);
+  w->resize(1400, 880);
+  QTest::qWait(500);
+  b->setTheme("dark");
+  b->setMotion(false);
+  b->setVolume(0);
+  b->setAutoplay(false);
+  b->setPrepareNext(false);
+  b->setWatchMusicFolders(false);
+  b->setOnlineArtwork(false);
+  b->setLyricsFallback(false);
+  b->setArtworkAccent(false);
+  b->setAccentColor("");
+  b->setAmbientBackdrop(true);
+
+  paintCover(c.directory + "/music/cover.png", QColor("#1b4f8a"), QColor("#e8622a"));
+  for (int i = 1; i <= 3; ++i)
+    if (!encodeTrack(c, QString("%1/music/%2.flac").arg(c.directory).arg(i),
+                     QString("Track %1").arg(i), "Wash", "Rill", i))
+      return c.finish();
+  b->importMusicFolder(QUrl::fromLocalFile(c.directory + "/music"));
+  c.check(c.until([&] { return !b->importingLocal(); }, 40000), "import the wash fixture");
+  b->library("files");
+  c.check(c.until([&] { return b->results()->count() == 3; }), "the fixture is in the library");
+
+  auto wash = anyItem(w->contentItem(), "windowBackdrop");
+  c.check(wash, "the window carries a wash of its own");
+  if (!wash)
+    return c.finish();
+
+  // --- It spans the window, not one panel of it ---
+  c.check(qAbs(wash->width() - w->width()) < 1 && qAbs(wash->height() - w->height()) < 1,
+          QString("the wash covers the whole window (%1x%2 of %3x%4)")
+              .arg(wash->width()).arg(wash->height()).arg(w->width()).arg(w->height()));
+  auto content = anyItem(w->contentItem(), "contentBody");
+  c.check(content && wash->width() > content->width() + 40,
+          "which is wider than the panel that used to carry it alone");
+
+  // --- Nothing playing and nothing to borrow: no wash at all ---
+  b->home();
+  c.check(c.until([&] { return !b->busy(); }), "Home loads");
+  QTest::qWait(400);
+  c.check(w->property("windowArtwork").toString().isEmpty(), "there is no cover to wash with yet");
+  c.check(!wash->property("active").toBool(), "so the window is left alone");
+  c.check(qAbs(w->property("washAlpha").toReal() - 1) < 0.001,
+          "and the surfaces stay opaque");
+  c.shot("01-no-wash");
+
+  // --- Playing something washes the window ---
+  b->library("files");
+  b->enqueueItems(b->results()->rows);
+  b->playAt(0);
+  c.check(c.until([&] { return b->playing(); }), "the fixture plays");
+  c.check(c.until([&] { return wash->property("active").toBool(); }, 4000),
+          "the playing cover washes the window");
+  c.check(w->property("windowWashed").toBool(), "the window reports itself washed");
+  c.check(w->property("washAlpha").toReal() < 1,
+          "and the surfaces let it through rather than covering it");
+  auto art = anyItem(wash, "ambientArt");
+  c.check(art && art->property("source").toUrl() == QUrl(b->current().value("art").toString()),
+          "the wash is taken from the cover that is playing");
+  c.check(wash->property("drifts").toBool(), "a full-bleed wash drifts, having no corners to keep");
+  c.shot("02-window-washed");
+
+  // --- The wash reaches every part of the window, not just the middle ---
+  // Sampled from the rendered window: the rail gutter, the player bar and the
+  // panel all have to differ from the same scene with the wash turned off.
+  const auto washed = w->grabWindow();
+  b->setAmbientBackdrop(false);
+  QTest::qWait(500);
+  c.check(!wash->property("active").toBool(), "turning it off releases the wash");
+  c.check(qAbs(w->property("washAlpha").toReal() - 1) < 0.001, "and the surfaces close up again");
+  const auto plain = w->grabWindow();
+  c.shot("03-wash-off");
+  c.check(washed.size() == plain.size(), "both renders are the same size");
+  if (washed.size() == plain.size()) {
+    // Averaged over a small block, because a single pixel can coincide by
+    // chance where the wash happens to be dark.
+    const auto average = [](const QImage &image, int x, int y) {
+      double r = 0, g = 0, bl = 0;
+      int seen = 0;
+      for (int dy = -10; dy <= 10; ++dy)
+        for (int dx = -10; dx <= 10; ++dx) {
+          const int sx = qBound(0, x + dx, image.width() - 1);
+          const int sy = qBound(0, y + dy, image.height() - 1);
+          const auto pixel = image.pixelColor(sx, sy);
+          r += pixel.redF();
+          g += pixel.greenF();
+          bl += pixel.blueF();
+          ++seen;
+        }
+      return QColor::fromRgbF(r / seen, g / seen, bl / seen);
+    };
+    struct Spot { const char *where; double x, y; };
+    for (const auto &spot : {Spot{"the navigation rail", 0.03, 0.45},
+                             Spot{"the player bar", 0.5, 0.94},
+                             Spot{"the list behind the songs", 0.6, 0.6},
+                             Spot{"the gutter above the content", 0.06, 0.03}}) {
+      const int x = int(washed.width() * spot.x), y = int(washed.height() * spot.y);
+      const auto a = average(washed, x, y), z = average(plain, x, y);
+      const double difference = qAbs(a.redF() - z.redF()) + qAbs(a.greenF() - z.greenF()) +
+                                qAbs(a.blueF() - z.blueF());
+      c.check(difference > 0.004, QString("the wash reaches %1 (difference %2)")
+                                      .arg(spot.where).arg(difference, 0, 'f', 4));
+    }
+  }
+  b->setAmbientBackdrop(true);
+  QTest::qWait(400);
+
+  // --- Contrast survives it ---
+  // Body text is drawn over these surfaces, so the composited surface is what
+  // has to clear the floor, not the colour the theme nominally asks for.
+  const auto lit = w->grabWindow();
+  const auto text = c.themeColor("text");
+  struct Surface { const char *where; double x, y; };
+  for (const auto &surface : {Surface{"the song list", 0.62, 0.62},
+                              Surface{"the player bar", 0.42, 0.93},
+                              Surface{"the window behind the rail", 0.03, 0.5}}) {
+    const auto sampled = lit.pixelColor(int(lit.width() * surface.x), int(lit.height() * surface.y));
+    const double ratio = contrastOf(text, sampled);
+    c.check(ratio >= 4.5, QString("body text keeps %1:1 over %2")
+                              .arg(ratio, 0, 'f', 2).arg(surface.where));
+  }
+  c.shot("04-washed-contrast");
+
+  // --- Immersive and the mini player carry their own treatment ---
+  w->setProperty("immersive", true);
+  QTest::qWait(500);
+  c.check(!w->property("windowWashed").toBool(),
+          "the immersive player is its own surface and is not washed twice");
+  w->setProperty("immersive", false);
+  QTest::qWait(400);
+  c.check(c.until([&] { return w->property("windowWashed").toBool(); }, 3000),
+          "leaving it restores the wash");
+
   b->stop();
   b->clearQueue();
   c.finish();

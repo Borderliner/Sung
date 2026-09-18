@@ -17,6 +17,7 @@
 #include "collectionview.h"
 #include "playbacknotifier.h"
 #include "musicserver.h"
+#include "scrobbler.h"
 #include <QElapsedTimer>
 #include <QFileSystemWatcher>
 
@@ -89,6 +90,7 @@ class Backend : public QObject {
   // The songs played before this one, newest first, for the queue panel to
   // look back over without leaving it.
   Q_PROPERTY(Entries *recentlyPlayed READ recentlyPlayed CONSTANT)
+  Q_PROPERTY(Scrobbler *scrobbler READ scrobbler CONSTANT)
   Q_PROPERTY(QVariantList audioDevices READ audioDevices NOTIFY audioDevicesChanged)
   Q_PROPERTY(QString audioDeviceId READ audioDeviceId WRITE setAudioDeviceId NOTIFY audioDevicesChanged)
   Q_PROPERTY(QString audioDeviceName READ audioDeviceName NOTIFY audioDevicesChanged)
@@ -178,6 +180,7 @@ class Backend : public QObject {
   Q_PROPERTY(QVariantList lyricLines READ lyricLines NOTIFY lyricsChanged)
   Q_PROPERTY(int lyricIndex READ lyricIndex NOTIFY lyricIndexChanged)
   Q_PROPERTY(double lyricProgress READ lyricProgress NOTIFY positionChanged)
+  Q_PROPERTY(int lyricSpan READ lyricSpan NOTIFY lyricIndexChanged)
   Q_PROPERTY(bool lyricsBusy READ lyricsBusy NOTIFY lyricsChanged)
   Q_PROPERTY(QVariantList playlists READ playlists NOTIFY libraryChanged)
   Q_PROPERTY(QVariantList pins READ pins NOTIFY libraryChanged)
@@ -192,6 +195,16 @@ public:
   Q_INVOKABLE QString saveSmartPlaylist(const QString &id,const QString &name,const QVariantMap &rules);
   Q_INVOKABLE QString previewLyric(qint64 position) const;
   Q_INVOKABLE QVariantList trackDetails(const QVariantMap &track) const;
+  // What has been listened to, over the last `days` or over everything when
+  // days is zero or less. Counted from a log of plays rather than from the
+  // recent-history list, which keeps only one row per song.
+  Q_INVOKABLE QVariantMap listeningStats(int days) const;
+  Q_INVOKABLE void clearListeningStats();
+  // Earlier versions of a playlist, newest first, so an edit can be looked back
+  // at and taken back long after the single-step Undo has moved on.
+  Q_INVOKABLE QVariantList playlistVersions(const QString &id) const;
+  Q_INVOKABLE bool restorePlaylistVersion(const QString &id,int index);
+  Q_INVOKABLE void clearPlaylistVersions(const QString &id);
   QVariantList playlistRows(const QVariantMap &playlist) const;
   QVariantList audioLevels() const {return m_audioLevels;}
   MusicServer *server() {return &m_server;}
@@ -233,6 +246,7 @@ public:
   Entries *queue() { return &m_queue; }
   CollectionView *collection() { return &m_collection; }
   Entries *recentlyPlayed() { return &m_recent; }
+  Scrobbler *scrobbler() { return &m_scrobbler; }
   QVariantList audioDevices() const;
   QString audioDeviceId() const {return m_settings.value("audioDevice").toString();}
   QString audioDeviceName() const;
@@ -410,6 +424,8 @@ public:
   QVariantList lyricLines() const { return m_lyricLines; }
   int lyricIndex() const;
   double lyricProgress() const;
+  int lyricSpan() const;
+  QPair<qint64,qint64> lyricSpanAt(int index) const;
   bool lyricsBusy() const { return m_lyricsBusy; }
   QVariantList playlists() const;
   QVariantList pins() const;
@@ -610,6 +626,21 @@ private:
   QVariantList m_sections, m_favorites, m_history, m_playlists, m_back, m_pins;
   Entries m_recent;
   void refreshRecentlyPlayed();
+  // One row per play, oldest first. A private session records nothing.
+  QVariantList m_plays;
+  void recordPlay(const QVariantMap &track);
+  // Listening history sent onward. A song is reported as it starts, and the
+  // listen itself once it has played far enough to count.
+  Scrobbler m_scrobbler;
+  quint64 m_scrobbleToken = 0;
+  qint64 m_scrobbleStartedAt = 0;
+  qint64 m_scrobbleThreshold = -1;
+  bool m_scrobbleSent = false;
+  void beginScrobble();
+  void considerScrobble();
+  // Playlist id to a list of earlier versions, newest first.
+  QVariantMap m_playlistVersions;
+  void snapshotPlaylist(const QString &id);
   int m_playbackDirection=1;
   QString m_viewKey = "home";
   QMap<QString,QVariantMap> m_viewOptions;
@@ -652,7 +683,10 @@ private:
   // end the decks swap roles. Nothing is handed from one to the other mid-song,
   // so neither side has a seam to hear.
   QAudioOutput m_audioA, m_audioB;
-  QAudioBufferOutput m_visualA, m_visualB;
+  // One decoded-audio tap, attached to whichever deck is being heard. Leaving a
+  // tap on the idle deck as well starves the active one of buffers, so it moves
+  // across when the decks swap rather than sitting on both.
+  QAudioBufferOutput m_visualAudio;
   QMediaPlayer m_deckA, m_deckB;
   bool m_usingB = false;
   QMediaPlayer &m_media() { return m_usingB ? m_deckB : m_deckA; }

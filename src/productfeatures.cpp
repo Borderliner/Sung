@@ -3,6 +3,9 @@
 #include <QFileInfo>
 #include <QSet>
 #include <QStandardPaths>
+#include <QDateTime>
+#include <QHash>
+#include <algorithm>
 
 QVariantMap Backend::albumInfo() const {
   if(m_page!="album" && m_page!="local-album" && !(m_page=="server" && m_request.value("mode")=="album"))return {};
@@ -295,4 +298,199 @@ void Backend::inspectOutputPorts(const QVariantList &sinks){
     if(!m_outputPort.isEmpty() && m_outputPort!=port && (m_outputPort.contains("headphone",Qt::CaseInsensitive)||m_outputPort.contains("headset",Qt::CaseInsensitive)))pauseForDisconnect();
     m_outputPort=port;return;
   }
+}
+
+// --- Listening statistics ----------------------------------------------------
+//
+// The recent-history list keeps one row per song, so it can say what was played
+// but not how often. These come from a separate log with one row per play, kept
+// only on this device and only while history is being recorded at all.
+
+void Backend::recordPlay(const QVariantMap &track) {
+  if(m_historyPaused)return;
+  const auto id=track.value("id").toString();
+  if(id.isEmpty())return;
+  m_plays.append(QVariantMap{{"at",QDateTime::currentSecsSinceEpoch()},
+                             {"id",id},
+                             {"title",track.value("title")},
+                             {"artist",track.value("artist")},
+                             {"album",track.value("album")},
+                             {"seconds",track.value("seconds")}});
+  // Roughly a decade of ordinary listening, then the oldest fall away.
+  while(m_plays.size()>20000)m_plays.removeFirst();
+}
+
+void Backend::clearListeningStats() {
+  if(m_plays.isEmpty())return;
+  m_plays.clear();
+  emit libraryChanged();
+  m_saveTimer.start();
+  emit toast("Listening statistics cleared");
+}
+
+QVariantMap Backend::listeningStats(int days) const {
+  const qint64 now=QDateTime::currentSecsSinceEpoch();
+  const qint64 from=days>0?now-qint64(days)*86400:0;
+  struct Tally { qint64 seconds=0; int plays=0; QString subtitle; };
+  QHash<QString,Tally> artists,albums,songs;
+  QSet<QString> distinctSongs;
+  qint64 total=0;
+  int plays=0;
+  // One bucket per day, oldest first, for the shape of the period.
+  const int buckets=days>0?qMin(days,90):0;
+  QList<qint64> daily(buckets,0);
+  const QChar separator(0x1f);
+  for(const auto &v:m_plays){
+    const auto play=v.toMap();
+    const auto at=play.value("at").toLongLong();
+    if(at<from)continue;
+    auto seconds=play.value("seconds").toLongLong();
+    if(seconds<0 || seconds>86400)seconds=0;
+    total+=seconds;
+    ++plays;
+    distinctSongs.insert(play.value("id").toString());
+    const auto artist=play.value("artist").toString().trimmed();
+    const auto album=play.value("album").toString().trimmed();
+    const auto title=play.value("title").toString().trimmed();
+    if(!artist.isEmpty()){auto &t=artists[artist];t.seconds+=seconds;++t.plays;}
+    if(!album.isEmpty()){auto &t=albums[album];t.seconds+=seconds;++t.plays;if(t.subtitle.isEmpty())t.subtitle=artist;}
+    if(!title.isEmpty()){auto &t=songs[title+separator+artist];t.seconds+=seconds;++t.plays;t.subtitle=artist;}
+    if(buckets>0){
+      const int bucket=buckets-1-int((now-at)/86400);
+      if(bucket>=0 && bucket<buckets)daily[bucket]+=seconds;
+    }
+  }
+  // Most time first, with the name breaking ties so the order never wobbles.
+  const auto rank=[separator](const QHash<QString,Tally> &source,bool joinedKey){
+    QVariantList rows;
+    for(auto i=source.constBegin();i!=source.constEnd();++i)
+      rows.append(QVariantMap{{"name",joinedKey?i.key().section(separator,0,0):i.key()},
+                              {"subtitle",i.value().subtitle},
+                              {"seconds",i.value().seconds},
+                              {"plays",i.value().plays}});
+    std::sort(rows.begin(),rows.end(),[](const QVariant &a,const QVariant &b){
+      const auto x=a.toMap(),y=b.toMap();
+      if(x.value("seconds").toLongLong()!=y.value("seconds").toLongLong())
+        return x.value("seconds").toLongLong()>y.value("seconds").toLongLong();
+      if(x.value("plays").toInt()!=y.value("plays").toInt())return x.value("plays").toInt()>y.value("plays").toInt();
+      return x.value("name").toString()<y.value("name").toString();
+    });
+    return rows.mid(0,10);
+  };
+  QVariantList dailyRows;
+  for(int i=0;i<buckets;++i)
+    dailyRows.append(QVariantMap{{"day",QDateTime::fromSecsSinceEpoch(now-qint64(buckets-1-i)*86400).date().toString("ddd")},
+                                 {"seconds",daily[i]}});
+  return {{"plays",plays},
+          {"seconds",total},
+          {"songs",distinctSongs.size()},
+          {"artists",artists.size()},
+          {"albums",albums.size()},
+          {"topArtists",rank(artists,false)},
+          {"topAlbums",rank(albums,false)},
+          {"topSongs",rank(songs,true)},
+          {"daily",dailyRows}};
+}
+
+// --- Playlist versions -------------------------------------------------------
+//
+// Undo takes back the last edit. This takes back an edit from last week: each
+// change to a playlist puts the version it replaced aside first, so the shape a
+// playlist used to have can be looked at and returned to.
+//
+// Versions hold whole rows rather than identities, so restoring one brings back
+// songs that were removed from everywhere else since. That costs space, so both
+// the number of versions and the rows across them are bounded.
+
+void Backend::snapshotPlaylist(const QString &id) {
+  if(id.isEmpty())return;
+  QVariantList tracks;
+  bool found=false;
+  for(const auto &v:m_playlists){
+    const auto p=v.toMap();
+    if(p.value("id").toString()!=id)continue;
+    tracks=p.value("tracks").toList();found=true;break;
+  }
+  if(!found)return;
+  auto versions=m_playlistVersions.value(id).toList();
+  // An edit that changed nothing is not a version.
+  if(!versions.isEmpty() && versions.first().toMap().value("tracks").toList()==tracks)return;
+  versions.prepend(QVariantMap{{"at",QDateTime::currentSecsSinceEpoch()},{"tracks",tracks}});
+  int rows=0;
+  for(int i=0;i<versions.size();++i){
+    rows+=versions[i].toMap().value("tracks").toList().size();
+    if(i>=12 || rows>5000){versions=versions.mid(0,qMax(1,i));break;}
+  }
+  m_playlistVersions[id]=versions;
+}
+
+QVariantList Backend::playlistVersions(const QString &id) const {
+  QVariantList rows;
+  for(const auto &v:m_playlistVersions.value(id).toList()){
+    const auto version=v.toMap();
+    const auto count=version.value("tracks").toList().size();
+    rows.append(QVariantMap{{"at",version.value("at")},
+                            {"count",count},
+                            {"summary",QString("%1 %2").arg(count).arg(count==1?"song":"songs")}});
+  }
+  return rows;
+}
+
+bool Backend::restorePlaylistVersion(const QString &id,int index) {
+  const auto versions=m_playlistVersions.value(id).toList();
+  if(index<0 || index>=versions.size())return false;
+  if(!smartPlaylist(id).isEmpty())return false;
+  const auto tracks=playable(versions[index].toMap().value("tracks").toList());
+  for(int i=0;i<m_playlists.size();++i){
+    auto p=m_playlists[i].toMap();
+    if(p.value("id").toString()!=id)continue;
+    if(p.value("tracks").toList()==tracks){emit toast("Playlist already matches that version");return false;}
+    // Put the version being replaced aside first, so a restore can be undone
+    // the same way any other edit can.
+    snapshotPlaylist(id);
+    m_undoType="playlists";m_undoRows=m_playlists;m_undoMessage="Playlist restored";
+    p["tracks"]=tracks;m_playlists[i]=p;
+    if(m_page=="local"&&m_libraryId==id)m_results.assign(tracks);
+    emit libraryChanged();
+    m_saveTimer.start();
+    emit toast(m_undoMessage);
+    return true;
+  }
+  return false;
+}
+
+void Backend::clearPlaylistVersions(const QString &id) {
+  if(!m_playlistVersions.contains(id))return;
+  m_playlistVersions.remove(id);
+  emit libraryChanged();
+  m_saveTimer.start();
+}
+
+// --- Listening history sent onward -------------------------------------------
+//
+// A song is announced as it starts, and reported as listened to once it has
+// played far enough to count. A private session reports nothing, the same way
+// it records nothing.
+
+void Backend::beginScrobble() {
+  m_scrobbleToken=m_trackToken;
+  m_scrobbleSent=false;
+  m_scrobbleStartedAt=QDateTime::currentSecsSinceEpoch();
+  m_scrobbleThreshold=-1;
+  if(m_historyPaused)return;
+  m_scrobbler.nowPlaying(current());
+}
+
+void Backend::considerScrobble() {
+  if(m_scrobbleSent || m_historyPaused || m_scrobbleToken!=m_trackToken || !playing())return;
+  if(m_scrobbleThreshold<0){
+    const auto total=duration();
+    if(total<=0)return;
+    m_scrobbleThreshold=Scrobbler::thresholdFor(total);
+    // A recording too short to count never will be.
+    if(m_scrobbleThreshold<0){m_scrobbleSent=true;return;}
+  }
+  if(position()<m_scrobbleThreshold)return;
+  m_scrobbleSent=true;
+  m_scrobbler.submit(current(),m_scrobbleStartedAt);
 }

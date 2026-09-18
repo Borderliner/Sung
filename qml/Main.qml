@@ -72,7 +72,7 @@ ApplicationWindow {
     property bool searchFocused: (window.activeFocusItem && window.activeFocusItem.handlesTextInput===true) || searchField.activeFocus || (window.activeFocusItem && window.activeFocusItem.objectName==="lyricSearchField")
     readonly property bool editableLocal: {app.playlists;return !!localPlaylist && !app.smartPlaylist(localPlaylist).id;}
     readonly property bool modalOpen: immersiveQueue.visible || otherModalOpen
-    readonly property bool otherModalOpen: trimDialog.visible || onboarding.visible || artworkViewer.visible || (immersiveLoader.item && immersiveLoader.item.popupVisible) || viewLayoutDialog.visible || volumeControl.popupVisible || homeEditor.visible || outputPicker.visible || sessionsDialog.visible || playlistCoverDialog.visible || commandPalette.visible || artworkControls.visible || smartDialog.visible || trackDetails.visible || shortcutHelp.visible || duplicateDialog.visible || serverToolbar.dialogOpen || serverConnection.visible || serverAddDialog.visible || serverRenameDialog.visible || serverDeleteDialog.visible || serverRatingDialog.visible || musicFoldersDialog.visible || musicFolderEntry.visible || cleanupDialog.visible || bulkActions.visible || volumeStepMenu.visible || rateDialog.visible || lyricTimingDialog.visible || settingsDialog.visible || playlistDialog.visible || addPlaylistDialog.visible || deletePlaylistDialog.visible || actions.visible || playlistActions.visible || sleepMenu.visible || (fileDialogs!==null && fileDialogs.visible) || audioDeviceDialog.visible || collectionSortMenu.visible
+    readonly property bool otherModalOpen: trimDialog.visible || onboarding.visible || artworkViewer.visible || (immersiveLoader.item && immersiveLoader.item.popupVisible) || viewLayoutDialog.visible || volumeControl.popupVisible || homeEditor.visible || outputPicker.visible || sessionsDialog.visible || statsDialog.visible || playlistVersionsDialog.visible || playlistCoverDialog.visible || commandPalette.visible || artworkControls.visible || smartDialog.visible || trackDetails.visible || shortcutHelp.visible || duplicateDialog.visible || serverToolbar.dialogOpen || serverConnection.visible || serverAddDialog.visible || serverRenameDialog.visible || serverDeleteDialog.visible || serverRatingDialog.visible || musicFoldersDialog.visible || musicFolderEntry.visible || cleanupDialog.visible || bulkActions.visible || volumeStepMenu.visible || rateDialog.visible || lyricTimingDialog.visible || settingsDialog.visible || playlistDialog.visible || addPlaylistDialog.visible || deletePlaylistDialog.visible || actions.visible || playlistActions.visible || sleepMenu.visible || (fileDialogs!==null && fileDialogs.visible) || audioDeviceDialog.visible || collectionSortMenu.visible
     property bool sliderFocused: window.activeFocusItem && window.activeFocusItem.handlesArrowKeys === true
     function selectedView() {var item=window.activeFocusItem;while(item){if(item.sourceRows!==undefined)return item;item=item.parent;}return tracks;}
     function addBatch(view) {batchItems=view.selection.items();addPlaylistDialog.open();}
@@ -317,7 +317,7 @@ ApplicationWindow {
     function activateSide(which) { side=side===which?"":which;if(side==="lyrics")app.fetchLyrics(); }
 
     function quickCommands() {
-        let rows=[{id:"view-layout",title:"Current view layout"},{id:"home-layout",title:"Customize Home"},{id:"sessions",title:"Listening sessions"},{id:"search",title:"Search music"},{id:"queue",title:"Show queue"},{id:"lyrics",title:"Show lyrics"},{id:"playing",title:"Show playing song"},{id:"mini",title:"Open mini player"},{id:"settings",title:"Open settings"},{id:"folders",title:"Manage music folders"},{id:"rescan",title:"Rescan music folders"},{id:"files",title:"Browse local music"},{id:"favorites",title:"Browse liked songs"}];
+        let rows=[{id:"view-layout",title:"Current view layout"},{id:"home-layout",title:"Customize Home"},{id:"sessions",title:"Listening sessions"},{id:"stats",title:"Listening statistics"},{id:"search",title:"Search music"},{id:"queue",title:"Show queue"},{id:"lyrics",title:"Show lyrics"},{id:"playing",title:"Show playing song"},{id:"mini",title:"Open mini player"},{id:"settings",title:"Open settings"},{id:"folders",title:"Manage music folders"},{id:"rescan",title:"Rescan music folders"},{id:"files",title:"Browse local music"},{id:"favorites",title:"Browse liked songs"}];
         if(app.currentIndex>=0)rows.push({id:"artwork",title:"Change animated cover"},{id:"play",title:app.playing?"Pause playback":"Resume playback"},{id:"immersive",title:"Toggle immersive player"});
         for(const p of app.playlists)rows.push({id:"playlist:"+p.id,title:"Open playlist · "+p.title,value:p.id});
         for(const device of app.audioDevices)rows.push({id:"device:"+device.id,title:"Audio output · "+device.name,value:device.id});
@@ -335,6 +335,7 @@ ApplicationWindow {
             else if(c.id==="mini")window.openMiniPlayer();
             else if(c.id==="settings")settingsDialog.open();
             else if(c.id==="sessions")sessionsDialog.open();
+            else if(c.id==="stats")statsDialog.open();
             else if(c.id==="view-layout")viewLayoutDialog.open();
             else if(c.id==="home-layout"){app.home();homeEditor.open();}
             else if(c.id==="folders")musicFoldersDialog.open();
@@ -351,6 +352,8 @@ ApplicationWindow {
     HomeEditor {id:homeEditor;anchors.centerIn:parent}
     OutputPicker {id:outputPicker;parent:window.contentItem}
     ListeningSessions {id:sessionsDialog;anchors.centerIn:parent}
+    ListeningStats {id:statsDialog;anchors.centerIn:parent}
+    PlaylistVersions {id:playlistVersionsDialog;anchors.centerIn:parent}
     ArtworkViewer {id:artworkViewer}
     ArtworkControls { id: artworkControls;onInspectRequested:url=>artworkViewer.inspect(url); anchors.centerIn: parent; onChooseFile: window.openFileDialog("artwork") }
     Shortcut { sequence: "Ctrl+Shift+P"; enabled: !window.modalOpen; onActivated: commandPalette.open() }
@@ -422,6 +425,27 @@ ApplicationWindow {
             Loader {id:immersiveQueueLoader;Layout.fillWidth:true;Layout.fillHeight:true;active:immersiveQueue.visible;sourceComponent:queuePanel}
         }
     }
+    // The cover the window takes its wash from: what is playing, then whatever
+    // the page itself is showing, then a cover Home has borrowed.
+    readonly property string windowArtwork: app.current.art || app.cover || window.homeArtwork || ""
+    // Material keeps hero imagery behind the surfaces rather than on them. The
+    // wash sits at the very back of the window and every panel floats over it,
+    // so the colour of what is playing reaches the whole app rather than one
+    // panel of it.
+    AmbientBackdrop {
+        objectName: "windowBackdrop"
+        anchors.fill: parent
+        visible: !window.compactMode && !window.immersive && active
+        url: window.windowArtwork
+        scrim: Theme.background
+        dim: 0.80
+        corner: 0
+    }
+    // How much of the wash the floating surfaces let through. Opaque when there
+    // is no wash, so nothing changes for anyone who has turned it off.
+    readonly property bool windowWashed: app.ambientBackdrop && !!window.windowArtwork && !window.compactMode && !window.immersive
+    readonly property real washAlpha: windowWashed ? 0.74 : 1
+    function washed(surface) { return Qt.rgba(surface.r,surface.g,surface.b,window.washAlpha) }
     RowLayout {
         visible: !window.compactMode && !window.immersive
         anchors.fill: parent; spacing: 0
@@ -598,10 +622,12 @@ ApplicationWindow {
                     Behavior on headerExtent {enabled:!tracks.moving;NumberAnimation {duration:app.motion?120:0;easing.type:Easing.OutCubic}}
                     visible: !(window.width < 1000 && window.side)
                     Layout.fillWidth: true; Layout.fillHeight: true
-                    radius: 28; color: Theme.surface; clip: true
+                    radius: 28; color: window.washed(Theme.surface); clip: true
                     AmbientBackdrop {
                         objectName: "homeBackdrop"; anchors.fill: parent
-                        url: app.page==="home" ? window.homeArtwork : ""
+                        // The window wash already carries this cover; repeating
+                        // it inside the panel would only double the scrim.
+                        url: app.page==="home" && !window.windowWashed ? window.homeArtwork : ""
                         scrim: Theme.surface; dim: 0.88; corner: parent.radius
                     }
                     ColumnLayout {
@@ -867,7 +893,7 @@ ApplicationWindow {
                     Layout.fillWidth: window.width < 1000
                     property real revealWidth: window.side ? (window.width < 1000 ? window.width-104 : Math.max(320,Math.min(geometry.panelWidth,window.width-560))) : 0
                     Layout.preferredWidth: Math.max(0,revealWidth)
-                    Layout.fillHeight: true; radius: 28; color: Theme.surface
+                    Layout.fillHeight: true; radius: 28; color: window.washed(Theme.surface)
                     visible: Layout.preferredWidth>1; clip: true
                     Behavior on revealWidth { enabled: !gripMouse.pressed; NumberAnimation { duration: app.motion?350:0; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.curve } }
                     AmbientBackdrop {
@@ -897,7 +923,7 @@ ApplicationWindow {
                 }
             }
             Rectangle {
-                Layout.fillWidth: true; Layout.preferredHeight: 112; color: Theme.container; radius: 28
+                Layout.fillWidth: true; Layout.preferredHeight: 112; color: window.washed(Theme.container); radius: 28
                 RowLayout {
                     anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 16; spacing: 16
                     AbstractButton { id: nowButton; objectName: "nowButton"; Layout.preferredWidth: 64; Layout.preferredHeight: 64; enabled: app.currentIndex>=0; focusPolicy: Qt.StrongFocus; Accessible.name: "Now playing"; onClicked: window.activateSide("now")
@@ -1090,6 +1116,7 @@ ApplicationWindow {
         MMenuItem { text: "Change cover…"; onTriggered: {playlistCoverDialog.playlistId=window.editPlaylistId;playlistCoverDialog.preview="";playlistCoverDialog.open();} }
         MMenuItem { text: "Restore cover collage"; onTriggered: app.resetPlaylistCover(window.editPlaylistId) }
         MMenuItem { objectName: "exportM3uItem"; text: "Export as M3U\u2026"; onTriggered: window.openFileDialog("m3u-export") }
+        MMenuItem { objectName: "playlistVersionsItem"; text: "Version history\u2026"; visible: !app.smartPlaylist(window.editPlaylistId).id; onTriggered: playlistVersionsDialog.inspect(window.editPlaylistId,playlistName.text) }
         MMenuItem { text: "Rename"; onTriggered: {window.playlistAction="rename";playlistDialog.open();} }
         MMenuItem { text: "Delete"; onTriggered: deletePlaylistDialog.open() }
     }
@@ -1385,7 +1412,7 @@ ApplicationWindow {
                 ColumnLayout {
                     id: settingsGroup2; objectName:"settingsGroup2"
                     Layout.fillWidth:true;Layout.minimumWidth:0; spacing:12
-                    property bool hasMatches: settingsDialog.matches("Music folders import manage") || settingsDialog.matches("Keyboard shortcuts keys help") || settingsDialog.matches("Quick actions commands playlists") || settingsDialog.matches("Update music folders automatically watch") || settingsDialog.matches("Type to jump in lists keyboard") || settingsDialog.matches("Start page Home local music server liked") || settingsDialog.matches("Customize Home sections order") || settingsDialog.matches("Listening sessions saved queues")
+                    property bool hasMatches: settingsDialog.matches("Music folders import manage") || settingsDialog.matches("Keyboard shortcuts keys help") || settingsDialog.matches("Quick actions commands playlists") || settingsDialog.matches("Update music folders automatically watch") || settingsDialog.matches("Type to jump in lists keyboard") || settingsDialog.matches("Start page Home local music server liked") || settingsDialog.matches("Customize Home sections order") || settingsDialog.matches("Listening sessions saved queues") || settingsDialog.matches("Listening statistics top artists albums time")
                     visible: settingsDialog.searchQuery.trim() ? hasMatches : settingsDialog.category===2
                     SungText {text:"Library";font.pixelSize:20;font.weight:Font.Medium;Layout.bottomMargin:8}
                     ColumnLayout {id:options2;objectName:"settingsRows2";Layout.fillWidth:true;Layout.minimumWidth:0;spacing:12
@@ -1398,6 +1425,7 @@ ApplicationWindow {
                 MSegmentedControl {visible:settingsDialog.matches("Start page Home local music server liked");accessibleName:"Start page"; options:[{key:"home",label:"Home",name:"startPage_home"},{key:"files",label:"Local",name:"startPage_files"},{key:"server",label:"Server",name:"startPage_server"},{key:"favorites",label:"Liked",name:"startPage_favorites"}];value:app.startPage;onChosen:value=>app.startPage=value}
                 MSettingRow {opens:true;text:"Customize Home";visible:settingsDialog.matches("Customize Home sections order");onClicked:{settingsDialog.close();app.home();homeEditor.open();}}
                 MSettingRow {opens:true;objectName:"sessionsButton";text:"Listening sessions";visible:settingsDialog.matches("Listening sessions saved queues");onClicked:{settingsDialog.close();sessionsDialog.open();}}
+                MSettingRow {opens:true;objectName:"listeningStatsButton";text:"Listening statistics";visible:settingsDialog.matches("Listening statistics top artists albums time");onClicked:{settingsDialog.close();statsDialog.open();}}
                     }
                 }
                 ColumnLayout {

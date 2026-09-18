@@ -7,9 +7,11 @@ import QtQuick.Controls
 // last, and the lines around it stand back far enough to be read ahead without
 // competing.
 //
-// Material's display type scale carries the line, one step down for its
-// neighbours, and the fill uses the primary role against the same role held at
-// reading contrast, so the sweep reads as emphasis rather than as two colours.
+// Two things keep it smooth. The fill is animated across each line at the pace
+// the line is sung, rather than being redrawn wherever playback happens to
+// report itself, so it sweeps instead of stepping four times a second. And
+// every line is set at one size, with emphasis carried by scale, so changing
+// line never re-shapes text.
 Item {
     id: root
     objectName: "singAlong"
@@ -19,7 +21,39 @@ Item {
     // Sized from the window so a line lands somewhere near a comfortable
     // measure at any width, then capped so it never outgrows the display scale.
     readonly property int lineSize: Math.max(28,Math.min(72,Math.round(width/22)))
-    readonly property int neighbourSize: Math.round(lineSize*0.62)
+    readonly property real restingScale: 0.62
+
+    // 0 to 1 across the line being sung. Playback reports itself four times a
+    // second; this carries on between those reports and re-anchors on each one.
+    property real fill: 0
+    NumberAnimation {
+        id: sweep
+        target: root
+        property: "fill"
+        to: 1
+        easing.type: Easing.Linear
+    }
+    function resync() {
+        sweep.stop()
+        const measured = app.lyricProgress
+        if (measured < 0) { fill = 0; return }
+        fill = measured
+        if (!app.playing || !app.motion) return
+        const remaining = (1-measured)*app.lyricSpan/Math.max(0.1,app.playbackRate)
+        if (remaining <= 16) { fill = 1; return }
+        sweep.duration = remaining
+        sweep.start()
+    }
+    Component.onCompleted: resync()
+    onVisibleChanged: resync()
+    Connections {
+        target: app
+        function onPositionChanged() { root.resync() }
+        function onLyricIndexChanged() { root.resync() }
+        function onPlaybackChanged() { root.resync() }
+        function onSeeked() { root.resync() }
+        function onLyricsChanged() { root.resync() }
+    }
 
     ListView {
         id: lines
@@ -29,7 +63,9 @@ Item {
         anchors.rightMargin: 48
         visible: root.ready
         clip: true
-        spacing: Math.round(root.lineSize*0.5)
+        // Every line reserves the sung line's height, so the run of words never
+        // shifts as emphasis moves through it.
+        spacing: Math.round(root.lineSize*0.22)
         model: app.lyricLines
         reuseItems: true
         cacheBuffer: 200
@@ -66,8 +102,13 @@ Item {
 
             // Everything but the line being sung stands back; what has already
             // been sung stands back furthest.
-            opacity: current ? 1 : past ? 0.28 : 0.45
+            opacity: current ? 1 : past ? 0.26 : 0.42
             Behavior on opacity { enabled: app.motion; NumberAnimation { duration: Theme.normal; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.effectsCurve } }
+            // Scale, not size: changing a font size would re-shape the text on
+            // every frame of the transition, which is what makes it stutter.
+            scale: current ? 1 : root.restingScale
+            transformOrigin: Item.Center
+            Behavior on scale { enabled: app.motion; NumberAnimation { duration: 320; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.curve } }
 
             Text {
                 id: body
@@ -75,9 +116,8 @@ Item {
                 width: parent.width
                 text: line.modelData.text || "…"
                 font.family: Theme.fontFamily
-                font.pixelSize: line.current ? root.lineSize : root.neighbourSize
-                font.weight: line.current ? Font.DemiBold : Font.Medium
-                Behavior on font.pixelSize { enabled: app.motion; NumberAnimation { duration: 320; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.curve } }
+                font.pixelSize: root.lineSize
+                font.weight: Font.DemiBold
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
                 lineHeight: 1.2
@@ -93,7 +133,7 @@ Item {
                 anchors.left: body.left
                 anchors.top: body.top
                 height: body.height
-                width: line.current ? body.width*Math.max(0,app.lyricProgress) : line.past ? body.width : 0
+                width: line.current ? body.width*Math.max(0,Math.min(1,root.fill)) : line.past ? body.width : 0
                 visible: line.current || line.past
                 clip: true
                 Text {
@@ -121,7 +161,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             text: app.lyricGapSeconds>0 ? "Lyrics in "+app.lyricGapSeconds+" s" : "♪"
             color: Theme.muted
-            font.pixelSize: Math.round(root.neighbourSize*0.7)
+            font.pixelSize: Math.round(root.lineSize*0.45)
         }
     }
 

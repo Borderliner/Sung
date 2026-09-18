@@ -603,19 +603,26 @@ void runHomeRailTests(Backend *b, QQuickWindow *w) {
   b->home();
   c.check(c.until([&] { return !b->busy(); }), "home shelves load");
 
-  // --- Home ambient backdrop ---
-  auto backdrop = itemNamed(w->contentItem(), "homeBackdrop");
-  c.check(backdrop, "Home has an ambient backdrop");
+  // --- The ambient backdrop ---
+  // The wash belongs to the window rather than to one panel of it, so Home is
+  // tinted by the same surface that tints everything else.
+  auto backdrop = itemNamed(w->contentItem(), "windowBackdrop");
+  c.check(backdrop, "the window has an ambient backdrop");
   if (!backdrop)
     return c.finish();
   auto art = itemNamed(backdrop, "ambientArt");
-  c.check(art && art->property("blur").toInt() > 0, "the Home cover is blurred, not enlarged");
-  c.check(!backdrop->property("drifts").toBool(),
-          "a rounded surface holds still so its corners stay clean");
+  c.check(art && art->property("blur").toInt() > 0, "the cover is blurred, not enlarged");
+  c.check(backdrop->property("drifts").toBool(),
+          "a full-bleed wash drifts, having no corners to keep clean");
+  c.check(itemNamed(w->contentItem(), "homeBackdrop"),
+          "the panel keeps its own backdrop for when the window carries none");
   // Nothing playing and no shelf covers: Home must not invent a backdrop.
   c.check(w->property("homeArtwork").toString().isEmpty(), "Home finds no cover to borrow yet");
+  c.check(w->property("windowArtwork").toString().isEmpty(), "so the window has none either");
   c.check(!backdrop->property("active").toBool() && art->property("source").toUrl().isEmpty(),
           "a coverless Home shows no backdrop at all");
+  c.check(qAbs(w->property("washAlpha").toReal() - 1) < 0.001,
+          "and the surfaces stay opaque while there is nothing to show through them");
   c.shot("01-home-bare");
 
   // Playing something tints Home from the track.
@@ -643,18 +650,25 @@ void runHomeRailTests(Backend *b, QQuickWindow *w) {
           "Home prefers the playing cover once there is one");
   c.check(c.until([&] { return art->property("source").toUrl() == QUrl(b->current().value("art").toString()); }),
           "the backdrop follows the playing cover");
+  c.check(w->property("washAlpha").toReal() < 1,
+          "and the surfaces open up so it reaches the whole window");
   c.shot("02-home-playing");
 
   b->library("favorites");
   QTest::qWait(400);
-  c.check(!backdrop->property("active").toBool() && art->property("source").toUrl().isEmpty(),
-          "leaving Home releases the backdrop");
+  // The wash follows the music rather than the page, so leaving Home keeps it.
+  c.check(backdrop->property("active").toBool(),
+          "leaving Home keeps the wash, because the music has not stopped");
+  c.check(art->property("source").toUrl() == QUrl(b->current().value("art").toString()),
+          "still taken from what is playing");
   b->home();
   c.check(c.until([&] { return !b->busy(); }), "back to Home");
   QTest::qWait(300);
   b->setAmbientBackdrop(false);
   QTest::qWait(700);
-  c.check(!backdrop->property("active").toBool(), "the backdrop setting also governs Home");
+  c.check(!backdrop->property("active").toBool(), "the backdrop setting governs the wash");
+  c.check(qAbs(w->property("washAlpha").toReal() - 1) < 0.001,
+          "and turning it off closes the surfaces again");
   b->setAmbientBackdrop(true);
   QTest::qWait(700);
   c.check(backdrop->property("active").toBool(), "re-enabling restores it");
