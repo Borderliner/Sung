@@ -61,11 +61,14 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: 48
         anchors.rightMargin: 48
+        // The words keep clear of the countdown rather than running under it.
+        anchors.bottomMargin: waiting.visible ? waiting.height+16 : 0
         visible: root.ready
         clip: true
         // Every line reserves the sung line's height, so the run of words never
         // shifts as emphasis moves through it.
-        spacing: Math.round(root.lineSize*0.22)
+        // Scale already opens a gap around every line, so the list adds little.
+        spacing: Math.round(root.lineSize*0.10)
         model: app.lyricLines
         reuseItems: true
         cacheBuffer: 200
@@ -149,11 +152,15 @@ Item {
         }
     }
 
-    // A countdown through instrumental stretches, so a long gap does not read
-    // as the words having stopped working.
+    // A countdown through instrumental stretches, so a long gap does not read as
+    // the words having stopped working. It sits under them rather than across
+    // them: the words stay on screen through a gap, and a cue laid over them
+    // would leave neither readable.
     Column {
+        id: waiting
         objectName: "singAlongWaiting"
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
         spacing: 12
         visible: root.ready && root.activeIndex<0
         SungText {
@@ -161,7 +168,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             text: app.lyricGapSeconds>0 ? "Lyrics in "+app.lyricGapSeconds+" s" : "♪"
             color: Theme.muted
-            font.pixelSize: Math.round(root.lineSize*0.45)
+            font.pixelSize: Math.max(14,Math.round(root.lineSize*0.30))
         }
     }
 

@@ -736,6 +736,23 @@ void runSingAlongTests(Backend *b, QQuickWindow *w) {
   auto cue = shownItem(w->contentItem(), "singAlongCue");
   c.check(cue && cue->property("text").toString().contains("Lyrics in"),
           "and counts down to the first line");
+  // The words stay on screen through a gap, so the countdown has to sit clear
+  // of them rather than across them.
+  if (waiting) {
+    const auto cueRect = waiting->mapRectToScene(waiting->boundingRect());
+    int overlaps = 0;
+    for (const auto *name : {"singAlongCurrent", "singAlongLine"})
+      if (auto text = shownItem(singAlong, name)) {
+        const auto lineRect = text->mapRectToScene(text->boundingRect());
+        if (cueRect.intersects(lineRect))
+          ++overlaps;
+      }
+    c.check(overlaps == 0, QString("the countdown does not sit over the words (%1 overlapping)")
+                               .arg(overlaps));
+    auto list = shownItem(w->contentItem(), "singAlongLines");
+    c.check(list && list->mapRectToScene(list->boundingRect()).bottom() <= cueRect.top() + 1,
+            "the words are given room above it rather than running under it");
+  }
   c.shot("04-singalong-waiting");
 
   // --- A song with no timed lyrics cannot be sung along to, and says so ---
