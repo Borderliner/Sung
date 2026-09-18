@@ -5,6 +5,10 @@ AbstractButton {
     property string symbol: ""
     property string tip: text
     property real contentInset:18
+    // M3 button labels are label-large; list rows built from a button use body-large.
+    property real labelSize: Theme.labelLarge
+    // M3: a trailing icon communicates an action, such as opening something.
+    property string trailingSymbol: ""
     property bool leftAligned: false
     property bool filled: false
     property bool tonal: false
@@ -77,7 +81,13 @@ AbstractButton {
                     sourceComponent: MBusyIndicator { objectName: "buttonSpinner"; running: control.busy; ink: control.ink; trackColor: "transparent"; label: "Loading"; Accessible.ignored: true }
                 }
             }
-            SungText { id: buttonLabel; visible: control.text.length > 0; text: control.text; color: control.ink; width: control.leftAligned ? Math.max(0,control.width-(control.symbol.length || control.busy?40:0)-control.contentInset-18) : implicitWidth; elide: Text.ElideRight; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+            SungText { id: buttonLabel; visible: control.text.length > 0; text: control.text; color: control.ink; font.pixelSize: control.labelSize; width: control.leftAligned ? Math.max(0,control.width-(control.symbol.length || control.busy?40:0)-control.contentInset-(control.trailingSymbol.length?36:18)) : implicitWidth; elide: Text.ElideRight; font.weight: Font.Medium; anchors.verticalCenter: parent.verticalCenter }
+        }
+        Icon {
+            objectName: "buttonTrailingIcon"
+            visible: control.trailingSymbol.length > 0
+            anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+            name: control.trailingSymbol; ink: control.ink; Accessible.ignored: true
         }
     }
     scale: down ? 0.96 : 1

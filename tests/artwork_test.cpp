@@ -41,6 +41,51 @@ private slots:
     QImage fill(100,100,QImage::Format_ARGB32_Premultiplied);fill.fill(Qt::transparent);art.setFit(false);{QPainter painter(&fill);art.paint(&painter);}QVERIFY(fill.pixelColor(50,0).red()>240);
     art.setPixels(9000);QCOMPARE(art.pixels(),1600);art.setPixels(128);QCOMPARE(art.m_image.width(),128);
   }
+  void softenedBackdrop() {
+    QTemporaryDir dir;
+    // Hard edges are exactly what made an enlarged cover look blocky.
+    QImage checks(120,120,QImage::Format_RGB32);
+    for(int y=0;y<120;++y)for(int x=0;x<120;++x)checks.setPixel(x,y,((x/10)+(y/10))%2?qRgb(20,30,200):qRgb(230,180,40));
+    const auto path=dir.filePath("checks.png");QVERIFY(checks.save(path));
+    const auto detail=[](const QImage &image){
+      qint64 total=0;int samples=0;
+      for(int y=1;y<image.height();++y)for(int x=1;x<image.width();++x){
+        const auto a=image.pixelColor(x,y),b=image.pixelColor(x-1,y),c=image.pixelColor(x,y-1);
+        total+=qAbs(a.red()-b.red())+qAbs(a.green()-b.green())+qAbs(a.blue()-b.blue());
+        total+=qAbs(a.red()-c.red())+qAbs(a.green()-c.green())+qAbs(a.blue()-c.blue());
+        samples+=2;
+      }
+      return samples?double(total)/samples:0.0;
+    };
+    RoundedArt art;art.setWidth(120);art.setHeight(120);art.setRadius(0);art.setPixels(120);
+    art.setSource(QUrl::fromLocalFile(path));QVERIFY(art.ready());
+    QCOMPARE(art.blur(),0);
+    QVERIFY(art.m_softImage.isNull());
+    const double sharp=detail(art.m_image);
+    QVERIFY(sharp>20);
+    art.setBlur(18);
+    QCOMPARE(art.blur(),18);
+    QVERIFY(!art.m_softImage.isNull());
+    QCOMPARE(art.m_softImage.size(),art.m_image.size());
+    const double soft=detail(art.m_softImage);
+    // A real blur removes almost all of the edge energy, not just some of it.
+    QVERIFY2(soft<sharp*0.1,qPrintable(QString("sharp %1 soft %2").arg(sharp).arg(soft)));
+    // Averaging must not drain the picture toward the edges or toward grey.
+    const auto centre=art.m_softImage.pixelColor(60,60),corner=art.m_softImage.pixelColor(2,2);
+    QVERIFY(centre.alpha()==255 && corner.alpha()==255);
+    QVERIFY(qAbs(centre.red()-125)<45 && qAbs(centre.blue()-120)<45);
+    // Enlarging the softened cover is what the backdrop actually draws.
+    QImage enlarged(600,600,QImage::Format_ARGB32_Premultiplied);enlarged.fill(Qt::transparent);
+    {QPainter painter(&enlarged);art.paint(&painter);}
+    QVERIFY(detail(enlarged)<detail(art.m_image)*0.05);
+    art.setBlur(0);
+    QVERIFY(art.m_softImage.isNull());
+    QImage plain(600,600,QImage::Format_ARGB32_Premultiplied);plain.fill(Qt::transparent);
+    {QPainter painter(&plain);art.paint(&painter);}
+    QVERIFY(detail(plain)>detail(enlarged)*4);
+    art.setBlur(400);QCOMPARE(art.blur(),128);QVERIFY(!art.m_softImage.isNull());
+    art.setSource({});art.setBlur(12);QVERIFY(art.m_softImage.isNull());
+  }
   void accentSampling() {
     QTemporaryDir dir;RoundedArt art;QCOMPARE(art.seedColor().alpha(),0);
     QImage picture(64,64,QImage::Format_RGB32);picture.fill(QColor("#e04466"));const auto path=dir.filePath("pink.png");QVERIFY(picture.save(path));art.setSource(QUrl::fromLocalFile(path));

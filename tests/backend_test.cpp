@@ -36,15 +36,15 @@ private slots:
     Backend b;b.setSleepFade(true);b.setVolume(.6);b.setSleep(15);
     QVERIFY(b.m_sleepFadeStart.isActive());QVERIFY(!b.m_sleepFadeTick.isActive());
     b.m_sleepTimer.start(15000);b.updateSleepGain();
-    QVERIFY(qAbs(b.m_audio.volume()-.3)<.02);QCOMPARE(b.volume(),.6);
+    QVERIFY(qAbs(b.activeAudio().volume()-.3)<.02);QCOMPARE(b.volume(),.6);
     QCOMPARE(b.m_settings.value("volume").toDouble(),.6);
-    b.setVolume(.4);QVERIFY(qAbs(b.m_audio.volume()-.2)<.02);QCOMPARE(b.volume(),.4);
-    b.setSleepFade(false);QVERIFY(qAbs(b.m_audio.volume()-.4)<.001);QVERIFY(!b.m_sleepFadeStart.isActive());
-    b.setSleepFade(true);b.m_sleepTimer.start(500);b.updateSleepGain();QVERIFY(b.m_audio.volume()<.01);
+    b.setVolume(.4);QVERIFY(qAbs(b.activeAudio().volume()-.2)<.02);QCOMPARE(b.volume(),.4);
+    b.setSleepFade(false);QVERIFY(qAbs(b.activeAudio().volume()-.4)<.001);QVERIFY(!b.m_sleepFadeStart.isActive());
+    b.setSleepFade(true);b.m_sleepTimer.start(500);b.updateSleepGain();QVERIFY(b.activeAudio().volume()<.01);
     QTRY_COMPARE_WITH_TIMEOUT(b.sleepLabel(),QString("Off"),2000);
-    QVERIFY(qAbs(b.m_audio.volume()-.4)<.001);QCOMPARE(b.volume(),.4);QVERIFY(!b.m_sleepFadeTick.isActive());
+    QVERIFY(qAbs(b.activeAudio().volume()-.4)<.001);QCOMPARE(b.volume(),.4);QVERIFY(!b.m_sleepFadeTick.isActive());
     b.setSleep(15);b.m_sleepTimer.start(5000);b.updateSleepGain();b.setSleep(0);
-    QVERIFY(qAbs(b.m_audio.volume()-.4)<.001);QVERIFY(!b.m_sleepFadeStart.isActive());
+    QVERIFY(qAbs(b.activeAudio().volume()-.4)<.001);QVERIFY(!b.m_sleepFadeStart.isActive());
     {Backend restored;QCOMPARE(restored.volume(),.4);QVERIFY(restored.sleepFade());}
   }
   void collapsedSelectionExcludesRanges() {
@@ -65,7 +65,7 @@ private slots:
     QCOMPARE(b.queue()->data(b.queue()->index(1),Qt::UserRole+4).toString(),"Collection");QCOMPARE(b.queue()->data(b.queue()->index(2),Qt::UserRole+4).toString(),"Autoplay");
     b.moveQueue(2,0);QCOMPARE(b.queue()->data(b.queue()->index(0),Qt::UserRole+4).toString(),"Autoplay");b.removeQueue(0);b.undo();QCOMPARE(b.queue()->data(b.queue()->index(0),Qt::UserRole+4).toString(),"Autoplay");b.save();
     {Backend restored;QCOMPARE(restored.queue()->get(0).value("_queueOrigin").toString(),"autoplay");}
-    b.m_media.setSource({});b.m_savedPosition=0;
+    b.m_media().setSource({});b.m_savedPosition=0;
     b.m_lyricLines={QVariantMap{{"start",10000},{"end",15000},{"text","First"}},QVariantMap{{"start",25000},{"end",30000},{"text","Second"}}};
     QCOMPARE(b.lyricGapSeconds(),10);b.m_savedPosition=12000;QCOMPARE(b.lyricGapSeconds(),0);b.m_savedPosition=17000;QCOMPARE(b.lyricGapSeconds(),8);b.m_savedPosition=25000;QCOMPARE(b.lyricGapSeconds(),0);b.m_savedPosition=31000;QCOMPARE(b.lyricGapSeconds(),0);
     b.m_lyricLines[0]=QVariantMap{{"start",0},{"end",0},{"text","Long line without end"}};b.m_savedPosition=10000;QCOMPARE(b.lyricGapSeconds(),0);

@@ -113,6 +113,21 @@ def lyric_fallback(req):
     return None
 
 
+# Bits per sample, which ffprobe reports directly for lossless formats and only
+# through the decoder's sample format for the rest. A lossy codec has no
+# meaningful depth of its own, so it reports none.
+def sample_depth(stream):
+    raw = stream.get('bits_per_raw_sample')
+    try:
+        if raw and 0 < int(raw) <= 64: return int(raw)
+    except (TypeError, ValueError): pass
+    if str(stream.get('codec_name') or '').lower() not in ('flac','alac','wavpack','pcm_s16le','pcm_s24le','pcm_s32le','tta','ape'): return 0
+    depths = {'s16':16,'s16p':16,'s32':32,'s32p':32,'fltp':32,'flt':32,'u8':8,'u8p':8}
+    return depths.get(str(stream.get('sample_fmt') or '').lower(), 0)
+
+
+# ReplayGain and R128 loudness tags, mapped to the names the player reads.
+GAIN_TAGS = {'replaygain_track_gain':'replaygainTrackGain','replaygain_album_gain':'replaygainAlbumGain','r128_track_gain':'r128TrackGain'}
 AUDIO_EXTENSIONS = {'.mp3','.flac','.ogg','.opus','.m4a','.aac','.wav','.aiff','.aif','.wma'}
 
 
@@ -275,12 +290,17 @@ def local_files(req):
         path = Path(name).resolve()
         try:
             if path.suffix.lower() not in allowed or not path.is_file(): raise ValueError('Missing or unsupported audio file')
-            probe = subprocess.run(['ffprobe','-v','error','-protocol_whitelist','file,crypto,data','-show_entries','format=duration:format_tags=title,artist,album,album_artist,albumartist,track,disc,date,year:stream=codec_type,codec_name,sample_rate,bit_rate:stream_disposition=attached_pic','-of','json',str(path)],capture_output=True,timeout=5)
+            probe = subprocess.run(['ffprobe','-v','error','-protocol_whitelist','file,crypto,data','-show_entries','format=duration:format_tags=title,artist,album,album_artist,albumartist,track,disc,date,year,genre,composer,replaygain_track_gain,replaygain_album_gain,r128_track_gain:stream=codec_type,codec_name,sample_rate,bit_rate,channels,bits_per_raw_sample,sample_fmt:stream_tags=genre,composer,replaygain_track_gain,replaygain_album_gain,r128_track_gain:stream_disposition=attached_pic','-of','json',str(path)],capture_output=True,timeout=5)
             if probe.returncode or len(probe.stdout)>262144: raise ValueError('Could not read audio metadata')
             data = json.loads(probe.stdout)
             if not any(stream.get('codec_type')=='audio' for stream in data.get('streams',[])): raise ValueError('No audio stream')
             audio = next(stream for stream in data['streams'] if stream.get('codec_type') == 'audio')
             info = data.get('format',{}); tags = {k.lower():v for k,v in info.get('tags',{}).items()}
+            # Vorbis comments live on the audio stream; ID3 lives on the container.
+            tags = {**{k.lower():v for k,v in audio.get('tags',{}).items()}, **tags}
+            # FLAC and Opus keep loudness tags on the audio stream, MP3 on the container.
+            gain = {**{k:str(tags[k])[:32] for k in GAIN_TAGS if tags.get(k)},
+                    **{k.lower():str(v)[:32] for k,v in audio.get('tags',{}).items() if k.lower() in GAIN_TAGS and v}}
             seconds = float(info.get('duration') or 0)
             if not math.isfinite(seconds) or seconds<0 or seconds>604800: seconds=0
             identity = 'local_' + hashlib.sha256(os.fsencode(str(path))).hexdigest()
@@ -296,7 +316,7 @@ def local_files(req):
                         elif target.exists(): target.unlink()
                     except (OSError, subprocess.TimeoutExpired):
                         if target.exists(): target.unlink()
-            items.append(dict(id=identity,kind='song',videoId='',localPath=str(path),localStamp=local_stamp(path, cover),title=str(tags.get('title') or path.stem)[:512],artist=str(tags.get('artist') or '')[:512],album=str(tags.get('album') or '')[:512],albumArtist=str(tags.get('album_artist') or tags.get('albumartist') or '')[:512],trackNumber=tag_number(tags.get('track')),discNumber=tag_number(tags.get('disc')),year=str(tags.get('date') or tags.get('year') or '')[:4],seconds=round(seconds),duration=f'{int(seconds)//60}:{int(seconds)%60:02d}' if seconds else '',art=art,motionArt=motion,codec=str(audio.get('codec_name') or '').upper(),sampleRate=int(audio.get('sample_rate') or 0),bitrate=int(audio.get('bit_rate') or 0),available=True))
+            items.append(dict(**{GAIN_TAGS[k]:v for k,v in gain.items()},id=identity,kind='song',videoId='',localPath=str(path),localStamp=local_stamp(path, cover),title=str(tags.get('title') or path.stem)[:512],artist=str(tags.get('artist') or '')[:512],album=str(tags.get('album') or '')[:512],albumArtist=str(tags.get('album_artist') or tags.get('albumartist') or '')[:512],trackNumber=tag_number(tags.get('track')),discNumber=tag_number(tags.get('disc')),year=str(tags.get('date') or tags.get('year') or '')[:4],seconds=round(seconds),duration=f'{int(seconds)//60}:{int(seconds)%60:02d}' if seconds else '',art=art,motionArt=motion,codec=str(audio.get('codec_name') or '').upper(),sampleRate=int(audio.get('sample_rate') or 0),bitrate=int(audio.get('bit_rate') or 0),channels=int(audio.get('channels') or 0),bitDepth=sample_depth(audio),genre=str(tags.get('genre') or '')[:120],composer=str(tags.get('composer') or '')[:512],available=True))
         except (OSError, ValueError, subprocess.TimeoutExpired):
             errors.append(path.name)
     return {'items':items,'failed':errors}

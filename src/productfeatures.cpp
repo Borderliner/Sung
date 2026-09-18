@@ -20,6 +20,28 @@ QVariantMap Backend::albumInfo() const {
   return {{"artist",artist},{"summary",details.join(" · ")},{"multipleDiscs",discs.size()>1}};
 }
 
+QVariantMap Backend::artistInfo() const {
+  const bool serverArtist=m_page=="server" && m_request.value("mode")=="artist";
+  if(m_page!="artist" && m_page!="local-artist" && !serverArtist)return {};
+  QSet<QString> albums;qint64 seconds=0;bool complete=!m_results.rows.isEmpty();
+  for(const auto &v:m_results.rows){const auto t=v.toMap();
+    const auto album=t.value("album").toString();
+    if(!album.isEmpty())albums.insert(album.toCaseFolded());
+    auto duration=t.value("seconds").toLongLong();
+    if(duration<=0){const auto parts=t.value("duration").toString().split(':');for(const auto &part:parts)duration=duration*60+part.toInt();}
+    if(duration<=0)complete=false;else seconds+=duration;
+  }
+  // An online artist page is a set of shelves rather than a track list, so the
+  // counts come out of the shelves it did return.
+  int tracks=m_results.count();
+  if(tracks==0)for(const auto &v:m_sections){const auto section=v.toMap();tracks+=section.value("items").toList().size();}
+  QStringList details;
+  if(!albums.isEmpty())details<<QString("%1 %2").arg(albums.size()).arg(albums.size()==1?"album":"albums");
+  if(tracks>0)details<<QString("%1 %2").arg(tracks).arg(tracks==1?"song":"songs");
+  if(complete && seconds>0)details<<(seconds>=3600?QString("%1 hr %2 min").arg(seconds/3600).arg(seconds%3600/60):QString("%1 min").arg(qMax(qint64(1),seconds/60)));
+  return {{"name",m_title},{"summary",details.join(" · ")},{"albums",albums.size()},{"tracks",tracks},{"seconds",seconds}};
+}
+
 QString Backend::artworkChoice() const {return m_settings.value("artworkChoices").toMap().value(current().value("id").toString()).toString();}
 QString Backend::currentMotionArt() const {
   const auto choice=artworkChoice();if(choice=="disabled")return {};

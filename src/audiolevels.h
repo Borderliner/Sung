@@ -58,3 +58,36 @@ public:
     energy={};samples=0;return result;
   }
 };
+
+// Mean square of decoded PCM for playback levelling. This is a broadband RMS
+// estimate, not an EBU R128 meter: it costs one multiply per sample and only
+// has to be stable enough to compare one recording against another.
+class LoudnessMeter {
+  double sum=0;
+  qint64 samples=0;
+  int rate=0,used=0;
+public:
+  void reset() {sum=0;samples=0;rate=0;used=0;}
+  void process(const QAudioBuffer &buffer) {
+    const auto format=buffer.format();
+    if(!buffer.isValid()||!format.isValid())return;
+    rate=format.sampleRate();
+    const int channels=std::min(8,format.channelCount());
+    used=channels;
+    const auto bytes=buffer.constData<char>();
+    const int frames=buffer.frameCount(),bytesPerFrame=format.bytesPerFrame(),bytesPerSample=format.bytesPerSample();
+    for(qsizetype frame=0;frame<frames;++frame)
+      for(int channel=0;channel<channels;++channel){
+        double x=format.normalizedSampleValue(bytes+frame*bytesPerFrame+channel*bytesPerSample);
+        if(!std::isfinite(x))continue;
+        x=std::clamp(x,-1.0,1.0);sum+=x*x;++samples;
+      }
+  }
+  // Short measurements describe an intro, not a recording. Wait for enough audio.
+  double seconds() const {return rate>0&&used>0?double(samples)/(double(rate)*used):0;}
+  bool ready() const {return seconds()>=45;}
+  double levelDb() const {
+    if(samples<=0)return 0;
+    return 20*std::log10(std::max(std::sqrt(sum/samples),1e-6));
+  }
+};

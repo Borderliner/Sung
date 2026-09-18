@@ -8,6 +8,7 @@ MDialog {
     width: Math.min(540,parent.width-48); height: Math.min(660,parent.height-48)
     initialFocus: shortcuts
     title: "Keyboard shortcuts"; modal: true; standardButtons: Dialog.Close
+    scrollSource: shortcuts
     contentItem: ListView {
         id: shortcuts; objectName: "shortcutList"; clip: true; spacing: 4
         boundsBehavior: Flickable.StopAtBounds

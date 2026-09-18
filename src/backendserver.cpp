@@ -9,14 +9,14 @@ void Backend::setupServer() {
   auto lastPosition = std::make_shared<qint64>(0);
   auto progressTick = std::make_shared<qint64>(-1);
   connect(this, &Backend::positionChanged, this, [this,lastTrack,lastPosition,progressTick] {
-    if(m_media.playbackState()!=QMediaPlayer::StoppedState)*lastPosition=position();
+    if(m_media().playbackState()!=QMediaPlayer::StoppedState)*lastPosition=position();
     const auto tick=position()/10000;
     if(!historyPaused() && tick!=*progressTick && playing()) {
       *progressTick=tick;m_server.reportPlayback(current(),position(),false,false);
     }
   });
   connect(this, &Backend::playbackChanged, this, [this,lastPosition] {
-    if(!historyPaused())m_server.reportPlayback(current(),m_media.playbackState()==QMediaPlayer::StoppedState?*lastPosition:position(),!playing(),!playing()&&m_media.playbackState()==QMediaPlayer::StoppedState);
+    if(!historyPaused())m_server.reportPlayback(current(),m_media().playbackState()==QMediaPlayer::StoppedState?*lastPosition:position(),!playing(),!playing()&&m_media().playbackState()==QMediaPlayer::StoppedState);
   });
   connect(this, &Backend::seeked, this, [this](qint64 pos) {
     if(!historyPaused())m_server.reportPlayback(current(),pos,!playing(),false);

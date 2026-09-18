@@ -32,6 +32,38 @@ ListView {
     onGroupDiscsChanged:{folded={};scheduleGroups();}
     onModelChanged:{folded={};scheduleGroups();}
     Component.onCompleted:{groupReady=true;rebuildGroups();}
+    // Type-ahead jump. The buffer collects printable keys until a short pause,
+    // so "bl" finds "Blue Hour" rather than every row starting with "b".
+    property string typeAhead: ""
+    property int typeAheadRow: -1
+    Timer { id: typeAheadIdle; interval: 900; onTriggered: list.typeAhead="" }
+    // One pass over the rows: a title match wins outright, an artist match is
+    // only used when no title in the whole list starts with what was typed.
+    function matchRow(prefix) {
+        if(!prefix || !model)return -1;
+        let artistRow=-1;
+        for(let i=0;i<model.count;++i) {
+            if(rowFolded(i))continue;
+            const row=model.get(i);
+            if(String(row.title || "").toLowerCase().startsWith(prefix))return i;
+            if(artistRow<0 && String(row.artist || "").toLowerCase().startsWith(prefix))artistRow=i;
+        }
+        return artistRow;
+    }
+    function typeAheadKey(event) {
+        if(!app.typeAheadJump || event.text.length!==1)return false;
+        if(event.modifiers&(Qt.ControlModifier|Qt.AltModifier|Qt.MetaModifier))return false;
+        const character=event.text.toLowerCase();
+        // Space stays a playback shortcut unless it continues an active search.
+        if(character<" " || (character===" " && !list.typeAhead))return false;
+        const candidate=list.typeAhead+character;
+        const row=matchRow(candidate);
+        typeAheadIdle.restart();
+        if(row<0)return true;
+        list.typeAhead=candidate;list.typeAheadRow=row;
+        currentIndex=row;positionViewAtIndex(row,ListView.Contain);forceActiveFocus();
+        return true;
+    }
     property bool reorderEnabled: false
     property string playlistId: ""
     property string matchQuery: ""
@@ -125,6 +157,7 @@ ListView {
             event.accepted=true;
         } else if((event.key===Qt.Key_Space)&&(event.modifiers&Qt.ControlModifier)){selection.select(currentIndex,Qt.ControlModifier);event.accepted=true;}
         else if((event.key===Qt.Key_Return||event.key===Qt.Key_Enter)&&currentIndex>=0){list.activate(currentIndex,model.get(currentIndex));event.accepted=true;}
+        else if(list.typeAheadKey(event))event.accepted=true;
     }
     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
     delegate: TrackRow {

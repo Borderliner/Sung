@@ -15,6 +15,7 @@ class RoundedArt : public QQuickPaintedItem {
   Q_PROPERTY(QUrl source READ source WRITE setSource NOTIFY sourceChanged)
   Q_PROPERTY(qreal radius READ radius WRITE setRadius NOTIFY radiusChanged)
   Q_PROPERTY(int pixels READ pixels WRITE setPixels NOTIFY pixelsChanged)
+  Q_PROPERTY(int blur READ blur WRITE setBlur NOTIFY blurChanged)
   Q_PROPERTY(bool crossfade READ crossfade WRITE setCrossfade NOTIFY crossfadeChanged)
   Q_PROPERTY(bool transitioning READ transitioning NOTIFY transitionChanged)
   Q_PROPERTY(bool fit READ fit WRITE setFit NOTIFY fitChanged)
@@ -46,6 +47,10 @@ public:
     emit pixelsChanged();
     reload(true);
   }
+  int blur() const { return m_blur; }
+  // Softens the decoded cover once, so enlarging it stays smooth instead of
+  // showing the interpolation between a handful of source pixels.
+  void setBlur(int radius);
   MotionArtwork *animation() const { return m_animation; }
   void setAnimation(MotionArtwork *animation);
   bool ready() const { return (m_animation && !m_animation->frame().isNull()) || !m_image.isNull() || !m_previous.isNull(); }
@@ -58,6 +63,7 @@ signals:
   void sourceChanged();
   void radiusChanged();
   void pixelsChanged();
+  void blurChanged();
   void readyChanged();
   void fitChanged();
   void crossfadeChanged();
@@ -66,10 +72,14 @@ signals:
 private:
   void reload(bool preserve=false);
   void imageReady();
+  void soften();
+  const QImage &shown() const;
   void finishTransition();
   bool m_crossfade=false,m_previousFit=false;
   qreal m_mix=1;
   QImage m_previous;
+  QImage m_softImage,m_softPrevious;
+  int m_blur=0;
   std::unique_ptr<QVariantAnimation> m_fade;
   bool m_fit=false,m_originalSizeFallback=false;
   QUrl m_source;

@@ -10,13 +10,13 @@ MDialog {
             ScrollBar.vertical:MScrollBar {}
             delegate:Rectangle {required property var modelData;required property int index;width:list.width;height:64;radius:16;color:Theme.high
                 RowLayout {anchors.fill:parent;anchors.margins:8;spacing:4
-                    MSwitch {objectName:"homeVisible_"+index;text:modelData.title;Layout.fillWidth:true;checked:modelData.shown;onToggled:app.showHomeSection(modelData.title,checked)}
+                    MSwitch {objectName:"homeVisible_"+index;text:modelData.title;leftPadding:8;Layout.fillWidth:true;checked:modelData.shown;onToggled:app.showHomeSection(modelData.title,checked)}
                     MButton {objectName:"homeUp_"+index;symbol:"back";rotation:90;tip:"Move up";Accessible.name:"Move "+modelData.title+" up";enabled:index>0;onClicked:app.moveHomeSection(modelData.title,-1)}
                     MButton {objectName:"homeDown_"+index;symbol:"back";rotation:-90;tip:"Move down";Accessible.name:"Move "+modelData.title+" down";enabled:index<list.count-1;onClicked:app.moveHomeSection(modelData.title,1)}
                 }
             }
             SungText {anchors.centerIn:parent;text:app.busy?"Loading Home…":"No Home sections available";visible:list.count===0;color:Theme.muted}
         }
-        MButton {objectName:"homeLayoutReset";text:"Reset layout";onClicked:app.resetHomeLayout()}
+        MButton {objectName:"homeLayoutReset";text:"Reset layout";leftAligned:true;contentInset:16;onClicked:app.resetHomeLayout()}
     }
 }

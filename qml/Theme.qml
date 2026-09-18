@@ -4,6 +4,17 @@ QtObject {
     property color artworkSeed: "transparent"
     Behavior on artworkSeed {enabled:app.motion && app.artworkAccent;ColorAnimation {duration:240;easing.type:Easing.InOutCubic}}
     readonly property bool useArtwork: app.artworkAccent && artworkSeed.a > 0
+    // A hand-picked Material source color, used when no cover is driving the theme.
+    property color accentSeed: app.accentColor ? app.accentColor : "transparent"
+    Behavior on accentSeed {enabled:app.motion;ColorAnimation {duration:240;easing.type:Easing.InOutCubic}}
+    readonly property bool useAccent: !useArtwork && accentSeed.a > 0
+    readonly property bool useSource: useArtwork || useAccent
+    readonly property color sourceColor: useArtwork ? artworkSeed : accentSeed
+    // Material spreads five tonal palettes around one source color and reads
+    // every role off them at fixed tones. Surfaces included: that trace of the
+    // cover's hue in the neutrals is what ties the window to the music.
+    readonly property var roles: useSource ? app.colorScheme(sourceColor,dark) : ({})
+    function role(name,fallback) {const c=roles[name];return c===undefined?fallback:c;}
     function blend(a,b,t) {return Qt.rgba(a.r+(b.r-a.r)*t,a.g+(b.g-a.g)*t,a.b+(b.b-a.b)*t,1);}
     function luminance(c) {
         function linear(v) {return v<=0.04045?v/12.92:Math.pow((v+0.055)/1.055,2.4);}
@@ -31,20 +42,20 @@ QtObject {
     readonly property real pressedOpacity: 0.10
     readonly property bool followDesktop: app.theme === "system" && desktopTheme.available
     readonly property bool dark: followDesktop ? desktopTheme.dark : app.theme === "dark" || (app.theme === "system" && Application.styleHints.colorScheme === Qt.Dark)
-    readonly property color background: followDesktop ? desktopTheme.colors.background : (dark ? "#181211" : "#fff8f6")
-    readonly property color surface: followDesktop ? desktopTheme.colors.surface : (dark ? "#201a18" : "#fff1ec")
-    readonly property color container: followDesktop ? desktopTheme.colors.container : (dark ? "#2b2320" : "#f6e5de")
-    readonly property color high: followDesktop ? desktopTheme.colors.high : (dark ? "#382c28" : "#efddd5")
-    readonly property color text: followDesktop ? desktopTheme.colors.text : (dark ? "#f5ded5" : "#281912")
-    readonly property color muted: followDesktop ? desktopTheme.colors.muted : (dark ? "#d5bfb5" : "#705c53")
-    readonly property color outline: followDesktop ? desktopTheme.colors.outline : (dark ? "#57443b" : "#dcc5b9")
+    readonly property color background: followDesktop ? desktopTheme.colors.background : role("background", dark ? "#181211" : "#fff8f6")
+    readonly property color surface: followDesktop ? desktopTheme.colors.surface : role("surfaceContainerLow", dark ? "#201a18" : "#fff1ec")
+    readonly property color container: followDesktop ? desktopTheme.colors.container : role("surfaceContainer", dark ? "#2b2320" : "#f6e5de")
+    readonly property color high: followDesktop ? desktopTheme.colors.high : role("surfaceContainerHigh", dark ? "#382c28" : "#efddd5")
+    readonly property color text: followDesktop ? desktopTheme.colors.text : role("onSurface", dark ? "#f5ded5" : "#281912")
+    readonly property color muted: followDesktop ? desktopTheme.colors.muted : role("onSurfaceVariant", dark ? "#d5bfb5" : "#705c53")
+    readonly property color outline: followDesktop ? desktopTheme.colors.outline : role("outlineVariant", dark ? "#57443b" : "#dcc5b9")
     // Controls need a stronger boundary than decorative surface dividers.
     readonly property color controlOutline: Qt.rgba(muted.r, muted.g, muted.b, dark ? 0.65 : 0.8)
-    readonly property color primary: useArtwork ? readable(artworkSeed,[background,surface,container,high]) : followDesktop ? desktopTheme.colors.primary : (dark ? "#ffb596" : "#964829")
-    readonly property color primaryText: useArtwork ? (luminance(primary)>0.179?"#000000":"#ffffff") : followDesktop ? desktopTheme.colors.primaryText : (dark ? "#572008" : "#ffffff")
-    readonly property color primaryContainer: useArtwork ? blend(container,primary,0.16) : followDesktop ? desktopTheme.colors.primaryContainer : (dark ? "#75351b" : "#ffdbcb")
-    readonly property color containerText: useArtwork ? readable(primary,[primaryContainer]) : followDesktop ? desktopTheme.colors.containerText : (dark ? "#ffdbcb" : "#743419")
-    readonly property color secondary: followDesktop ? desktopTheme.colors.secondary : (dark ? "#d8c4a0" : "#6c5b3b")
+    readonly property color primary: useSource ? role("primary",sourceColor) : followDesktop ? desktopTheme.colors.primary : (dark ? "#ffb596" : "#964829")
+    readonly property color primaryText: useSource ? role("onPrimary",luminance(primary)>0.179?"#000000":"#ffffff") : followDesktop ? desktopTheme.colors.primaryText : (dark ? "#572008" : "#ffffff")
+    readonly property color primaryContainer: useSource ? role("primaryContainer",blend(container,primary,0.16)) : followDesktop ? desktopTheme.colors.primaryContainer : (dark ? "#75351b" : "#ffdbcb")
+    readonly property color containerText: useSource ? role("onPrimaryContainer",readable(primary,[primaryContainer])) : followDesktop ? desktopTheme.colors.containerText : (dark ? "#ffdbcb" : "#743419")
+    readonly property color secondary: followDesktop ? desktopTheme.colors.secondary : role("secondary", dark ? "#d8c4a0" : "#6c5b3b")
     readonly property color error: dark ? "#ffb4ab" : "#ba1a1a"
     readonly property int fast: app.motion ? 150 : 0
     readonly property int normal: app.motion ? 200 : 0

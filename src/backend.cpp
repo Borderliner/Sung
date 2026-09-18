@@ -2,9 +2,11 @@
 #include <QLocale>
 #include <QMediaMetaData>
 #include "lrc.h"
+#include "m3color.h"
 #include <QClipboard>
 #include <QSet>
 #include <cmath>
+#include <QColor>
 #include <algorithm>
 #include <queue>
 #include <QCoreApplication>
@@ -39,12 +41,18 @@ static QString itemId(const QVariant &v) {
   return v.toMap().value("id").toString();
 }
 Backend::Backend(QObject *parent) : QObject(parent) {
+  // Both decks report everything; only the one being heard is listened to.
+  const auto eachDeck=[this](const std::function<void(QMediaPlayer &)> &wire){wire(m_deckA);wire(m_deckB);};
   m_userVolume=qBound(0.0,m_settings.value("volume",0.65).toDouble(),1.0);
-  m_audio.setVolume(m_userVolume);
-  m_media.setAudioOutput(&m_audio);
+  m_audioA.setVolume(m_userVolume);
+  m_audioB.setVolume(m_userVolume);
+  m_deckA.setAudioOutput(&m_audioA);
+  m_deckB.setAudioOutput(&m_audioB);
+  m_deckA.setAudioBufferOutput(&m_visualA);
+  m_deckB.setAudioBufferOutput(&m_visualB);
   setPlaybackRate(m_settings.value("playbackRate",1.0).toDouble());
   setPreservePitch(m_settings.value("preservePitch",true).toBool());
-  connect(&m_media,&QMediaPlayer::playbackRateChanged,this,&Backend::settingsChanged);
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::playbackRateChanged,this,[this,&deck]{if(isActive(deck))emit settingsChanged();});});
   m_collection.setSourceModel(&m_results);
   connect(&m_queue,&Entries::countChanged,this,[this]{
     m_queueSuffix.fill(0,m_queue.count()+1);
@@ -61,8 +69,10 @@ Backend::Backend(QObject *parent) : QObject(parent) {
   connect(this,&Backend::settingsChanged,this,&Backend::queueInfoChanged);
   connect(&m_devices,&QMediaDevices::audioOutputsChanged,this,[this]{outputsChanged();});
   applyAudioDevice();setupDisconnectMonitor();
-  connect(&m_media,&QMediaPlayer::metaDataChanged,this,&Backend::qualityChanged);
-  connect(&m_media,&QMediaPlayer::sourceChanged,this,[this]{m_decodeRate=0;m_decodeChannels=0;emit qualityChanged();});
+  eachDeck([this](QMediaPlayer &deck){
+    connect(&deck,&QMediaPlayer::metaDataChanged,this,[this,&deck]{if(isActive(deck))emit qualityChanged();});
+    connect(&deck,&QMediaPlayer::sourceChanged,this,[this,&deck]{if(!isActive(deck))return;m_decodeRate=0;m_decodeChannels=0;emit qualityChanged();});
+  });
   m_saveTimer.setSingleShot(true);
   m_saveTimer.setInterval(600);
   connect(&m_saveTimer, &QTimer::timeout, this, &Backend::save);
@@ -70,8 +80,10 @@ Backend::Backend(QObject *parent) : QObject(parent) {
   m_sleepFadeTick.setInterval(100);
   connect(&m_sleepFadeStart,&QTimer::timeout,this,[this]{updateSleepGain();m_sleepFadeTick.start();});
   connect(&m_sleepFadeTick,&QTimer::timeout,this,&Backend::updateSleepGain);
-  connect(&m_media,&QMediaPlayer::positionChanged,this,[this]{if(m_sleepAtEnd)updateSleepGain();});
-  connect(&m_media,&QMediaPlayer::playbackRateChanged,this,[this]{if(m_sleepAtEnd)updateSleepGain();});
+  eachDeck([this](QMediaPlayer &deck){
+    connect(&deck,&QMediaPlayer::positionChanged,this,[this,&deck]{if(!isActive(deck))return;if(m_sleepAtEnd)updateSleepGain();considerCrossfade();});
+    connect(&deck,&QMediaPlayer::playbackRateChanged,this,[this,&deck]{if(isActive(deck)&&m_sleepAtEnd)updateSleepGain();});
+  });
   m_sleepTick.setInterval(60000);
   connect(&m_sleepTick, &QTimer::timeout, this, &Backend::settingsChanged);
   m_sleepTimer.setSingleShot(true);
@@ -90,13 +102,20 @@ Backend::Backend(QObject *parent) : QObject(parent) {
   connect(this,&Backend::positionChanged,this,updateLyricIndex);
   connect(this,&Backend::lyricsChanged,this,updateLyricIndex);
   // Throttle visible progress to four updates per second, with no idle timer.
+  m_crossfadeTick.setInterval(40);
+  connect(&m_crossfadeTick,&QTimer::timeout,this,&Backend::stepCrossfade);
   m_positionTick.setInterval(250);
   connect(&m_positionTick,&QTimer::timeout,this,[this]{emit positionChanged();});
   m_levelIdle.setSingleShot(true);
   connect(&m_levelIdle,&QTimer::timeout,this,&Backend::resetAudioLevels);
-  m_media.setAudioBufferOutput(&m_visualAudio);
-  connect(&m_visualAudio,&QAudioBufferOutput::audioBufferReceived,this,[this](const QAudioBuffer &buffer){
+  // Only the deck being heard drives the meters and the loudness measurement;
+  // a deck warming up in the background must not colour either.
+  const auto watchBuffers=[this](QAudioBufferOutput &tap,QMediaPlayer &deck){
+  connect(&tap,&QAudioBufferOutput::audioBufferReceived,this,[this,&deck](const QAudioBuffer &buffer){
+    if(!isActive(deck))return;
     if(buffer.isValid() && (m_decodeRate!=buffer.format().sampleRate() || m_decodeChannels!=buffer.format().channelCount())){m_decodeRate=buffer.format().sampleRate();m_decodeChannels=buffer.format().channelCount();emit qualityChanged();}
+    // Levelling measures every recording, including while the meters are idle.
+    if(buffer.isValid() && playing())m_loudness.process(buffer);
     if(!m_uiActive || !motion() || !playing())return;
     if(!buffer.isValid()){resetAudioLevels();return;}
     m_levelAnalyzer.process(buffer);
@@ -104,21 +123,27 @@ Backend::Backend(QObject *parent) : QObject(parent) {
     if(m_levelPublish.isValid() && m_levelPublish.elapsed()<33)return;
     m_levelPublish.restart();const auto levels=m_levelAnalyzer.takeLevels();
     if(levels!=m_audioLevels){m_audioLevels=levels;emit audioLevelsChanged();}
-  });
-  connect(&m_media,&QMediaPlayer::sourceChanged,this,&Backend::resetAudioLevels);
+  });};
+  watchBuffers(m_visualA,m_deckA);
+  watchBuffers(m_visualB,m_deckB);
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::sourceChanged,this,[this,&deck]{if(isActive(deck))resetAudioLevels();});});
+  connect(this,&Backend::trackChanged,this,&Backend::refreshRecentlyPlayed);
+  connect(this,&Backend::trackChanged,this,&Backend::updateNormalization);
   connect(this,&Backend::seeked,this,&Backend::resetAudioLevels);
   connect(this,&Backend::settingsChanged,this,[this]{if(!motion())resetAudioLevels();});
-  connect(&m_media, &QMediaPlayer::durationChanged, this,
-          &Backend::playbackChanged);
-  connect(&m_media, &QMediaPlayer::playbackStateChanged, this,
-          [this] {
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::durationChanged,this,[this,&deck]{if(isActive(deck))emit playbackChanged();});});
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::playbackStateChanged,this,
+          [this,&deck] {
+            if(!isActive(deck))return;
             if(playing()) {m_stopped=false;if(m_uiActive)m_positionTick.start();recordHistory();notifyTrack();QTimer::singleShot(0,this,&Backend::restorePlaybackPosition);} else {m_positionTick.stop();resetAudioLevels();}
             emit positionChanged(); emit playbackChanged();
-          });
-  connect(&m_media,&QMediaPlayer::seekableChanged,this,[this](bool seekable){if(seekable)QTimer::singleShot(0,this,&Backend::restorePlaybackPosition);});
+          });});
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::seekableChanged,this,[this,&deck](bool seekable){if(isActive(deck)&&seekable)QTimer::singleShot(0,this,&Backend::restorePlaybackPosition);});});
   connect(&m_server,&MusicServer::accountChanged,this,&Backend::cancelCoverPlay);
-  connect(&m_media, &QMediaPlayer::mediaStatusChanged, this,
-          [this](QMediaPlayer::MediaStatus s) {
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::mediaStatusChanged,this,
+          [this,&deck](QMediaPlayer::MediaStatus s) {
+            // A spare deck that runs out while waiting is simply finished.
+            if(!isActive(deck))return;
             emit playbackChanged();
             if (s == QMediaPlayer::LoadedMedia ||
                 s == QMediaPlayer::BufferedMedia) {
@@ -130,17 +155,27 @@ Backend::Backend(QObject *parent) : QObject(parent) {
               }
             }
             if (s == QMediaPlayer::EndOfMedia) {
-              if(m_sleepAtEnd){setSleep(0);pause();emit toast("Sleep timer ended");return;}
+              // A finished recording has nothing left to return to.
+              clearResumePosition(current().value("id").toString());
+              if(m_sleepAtEnd){endCrossfade(false);clearSpare();setSleep(0);pause();emit toast("Sleep timer ended");return;}
+              // Stop instead of advancing, autoplaying or wrapping around.
+              if(m_sleepAtQueueEnd&&!shuffle()&&repeat()==0&&m_index+1>=m_queue.count()){
+                endCrossfade(false);clearSpare();setSleep(0);pause();emit toast("Sleep timer ended");return;}
+              // An overlap runs right up to this moment. The song that was
+              // leaving has now left, so the fade is simply over.
+              if(m_crossfading){endCrossfade(true);return;}
               if (repeat() == 2) {
                 m_serverListenToken=0;
-                m_media.setPosition(0);
-                m_media.play();
-              } else
+                m_media().setPosition(0);
+                m_media().play();
+              } else if (!finishGapless())
                 next();
             }
-          });
-  connect(&m_media, &QMediaPlayer::errorOccurred, this,
-          [this](QMediaPlayer::Error err, const QString &) {
+          });});
+  eachDeck([this](QMediaPlayer &deck){connect(&deck,&QMediaPlayer::errorOccurred,this,
+          [this,&deck](QMediaPlayer::Error err, const QString &) {
+            // A spare that cannot load simply forfeits its head start.
+            if(!isActive(deck)){if(err!=QMediaPlayer::NoError)clearSpare();return;}
             if (err == QMediaPlayer::NoError || m_recovering)
               return;
             if(!current().value("localPath").toString().isEmpty()){
@@ -152,7 +187,7 @@ Backend::Backend(QObject *parent) : QObject(parent) {
             m_resolving=false; m_wantPlay=false;
             emit playbackChanged();
             notifyError("The audio stream was interrupted. Retry to reconnect.","play");
-          });
+          });});
   m_onlineArtworkTimer.setSingleShot(true);
   m_onlineArtworkTimer.setTimerType(Qt::PreciseTimer);
   m_onlineArtworkTimer.setInterval(1000);
@@ -179,6 +214,8 @@ Backend::Backend(QObject *parent) : QObject(parent) {
 Backend::~Backend() {
   m_portMonitor.kill();m_portProbe.kill();m_portMonitor.waitForFinished(500);m_portProbe.waitForFinished(500);
   m_notifier.clear();
+  storeResumePosition();
+  storeMeasuredLoudness();
   save();
   for (const auto &key : m_processes.keys())
     cancel(key);
@@ -453,6 +490,18 @@ void Backend::openLink(const QString &url) {
   browseRequest(
       {{"op", "link"}, {"url", url.trimmed()}, {"title", "YouTube Music"}});
 }
+// The song playing now is at the head of history; what the queue panel looks
+// back over is everything before it.
+void Backend::refreshRecentlyPlayed() {
+  const auto playingId=current().value("id").toString();
+  QVariantList recent;
+  for(const auto &v:m_history){
+    if(!playingId.isEmpty() && itemId(v)==playingId)continue;
+    recent.append(v);
+    if(recent.size()>=60)break;
+  }
+  m_recent.reconcile(recent);
+}
 QVariantList Backend::playable(const QVariantList &items) {
   QVariantList r;
   for (const auto &i : items) {
@@ -522,6 +571,10 @@ void Backend::playAt(int index, int direction) {
   cancelCoverPlay();
   if (index < 0 || index >= m_queue.count())
     return;
+  // Steering by hand cancels any handover already under way.
+  endCrossfade(false);
+  clearSpare();
+  storeResumePosition();
   invalidateUndo("queue-order");
   if(m_sleepAtEnd)setSleep(0);
   m_wantPlay = true; m_stopped=false; m_recoveryAttempts=0; m_recovering=false; ++m_trackToken; m_savedPosition=0;
@@ -529,10 +582,11 @@ void Backend::playAt(int index, int direction) {
   cancel("linkplay");
   cancel("lyrics");
   cancel("radio");
-  m_media.stop();
-  m_media.setSource(QUrl());
+  m_media().stop();
+  m_media().setSource(QUrl());
   m_playbackDirection=direction? (direction<0?-1:1):(index<m_index?-1:1);
   m_index = index;
+  if(resumeLongTracks()&&longRecording(current()))m_savedPosition=resumePosition(current().value("id").toString());
   dismissError();
   m_retry = false;
   m_restorePosition = 0;
@@ -545,11 +599,11 @@ void Backend::playAt(int index, int direction) {
   m_saveTimer.start();
 }
 void Backend::restorePlaybackPosition() {
-  if(m_restorePosition<=0 || !m_media.isSeekable() || m_media.playbackState()==QMediaPlayer::StoppedState)return;
+  if(m_restorePosition<=0 || !m_media().isSeekable() || m_media().playbackState()==QMediaPlayer::StoppedState)return;
   const auto target=m_restorePosition;
   m_restorePosition=0;
   m_savedPosition=target;
-  m_media.setPosition(target);
+  m_media().setPosition(target);
   m_resolving=false;
   emit positionChanged();emit playbackChanged();
 }
@@ -563,7 +617,7 @@ void Backend::recoverStream() {
   m_streams.remove(current().value("videoId").toString());
   // Defer resetting the media source until the decoder's error callback unwinds.
   const auto token=m_trackToken;
-  QTimer::singleShot(0,this,[this,token]{if(m_wantPlay && token==m_trackToken){m_media.stop();m_media.setSource({});resolveCurrent(true);}});
+  QTimer::singleShot(0,this,[this,token]{if(m_wantPlay && token==m_trackToken){m_media().stop();m_media().setSource({});resolveCurrent(true);}});
 }
 void Backend::resolveCurrent(bool retry) {
   if(isServerSource(current().value("source"))){
@@ -575,7 +629,7 @@ void Backend::resolveCurrent(bool retry) {
     m_server.download(current(),directory->path()+"/song",[this,token,directory](const QVariantMap &data,const QString &error){
       if(token!=m_trackToken)return;
       if(!error.isEmpty()){m_resolving=false;m_wantPlay=false;notifyError(error,"play");emit playbackChanged();return;}
-      m_media.setSource(QUrl::fromLocalFile(data.value("file").toString()));if(m_wantPlay)m_media.play();emit playbackChanged();
+      m_media().setSource(QUrl::fromLocalFile(data.value("file").toString()));if(m_wantPlay)m_media().play();emit playbackChanged();
     });emit playbackChanged();return;
   }
   if(!current().value("localPath").toString().isEmpty()) {
@@ -583,8 +637,8 @@ void Backend::resolveCurrent(bool retry) {
     const QFileInfo file(current().value("localPath").toString());
     if(!file.isFile()||!file.isReadable()){m_wantPlay=false;notifyError("Local file is missing or unreadable. Locate it from the song menu.","play");emit playbackChanged();return;}
     if(!retry&&m_savedPosition>0)m_restorePosition=m_savedPosition;
-    m_media.setSource(QUrl::fromLocalFile(file.absoluteFilePath()));
-    if(m_wantPlay)m_media.play();
+    m_media().setSource(QUrl::fromLocalFile(file.absoluteFilePath()));
+    if(m_wantPlay)m_media().play();
     emit playbackChanged();return;
   }
   auto id = current().value("videoId").toString();
@@ -624,10 +678,10 @@ void Backend::resolveCurrent(bool retry) {
       emit playbackChanged();
       return;
     }
-    if(m_media.source()==url)m_media.setSource({});
-    m_media.setSource(url);
+    if(m_media().source()==url)m_media().setSource({});
+    m_media().setSource(url);
     if (m_wantPlay)
-      m_media.play();
+      m_media().play();
   };
   if(!retry && m_preparedId==id && !m_preparedData.isEmpty()) {
     m_audioCache=std::move(m_preparedDirectory);const auto data=m_preparedData;
@@ -644,7 +698,7 @@ void Backend::resolveCurrent(bool retry) {
       return;
     }
   }
-  if(!retry && m_media.source().isEmpty() && m_savedPosition>0)m_restorePosition=m_savedPosition;
+  if(!retry && m_media().source().isEmpty() && m_savedPosition>0)m_restorePosition=m_savedPosition;
   m_audioCache=audioDirectory();
   if(!m_audioCache||!m_audioCache->isValid()){m_resolving=false;m_wantPlay=false;notifyError("Could not create the audio buffer.");emit playbackChanged();return;}
   request("play", {{"op", "buffer"}, {"id", id}, {"cookies", cookies()},
@@ -821,17 +875,18 @@ void Backend::play() {
     return;
   if (m_index < 0)
     playAt(0);
-  else if (m_media.source().isEmpty() ||
-           m_media.error() != QMediaPlayer::NoError)
+  else if (m_media().source().isEmpty() ||
+           m_media().error() != QMediaPlayer::NoError)
     resolveCurrent();
   else
-    m_media.play();
+    m_media().play();
 }
 void Backend::pause() {
   cancelCoverPlay();
   cancel("linkplay");
   m_recovering=false;
   m_savedPosition=position();
+  storeResumePosition();
   m_wantPlay = false;
   if (m_resolving) {
     cancel("play");
@@ -839,10 +894,12 @@ void Backend::pause() {
     m_resolving = false;
     emit playbackChanged();
   }
-  m_media.pause();
+  m_media().pause();
 }
 void Backend::stop() {
   cancelCoverPlay();
+  endCrossfade(false);
+  clearSpare();
   if(m_sleepAtEnd)setSleep(0);
   cancel("linkplay");
   m_recovering=false;
@@ -852,14 +909,20 @@ void Backend::stop() {
   cancel("play");
   cancel("radio");
   m_resolving = false;
-  m_media.stop();
-  m_media.setSource(QUrl());
+  m_media().stop();
+  m_media().setSource(QUrl());
   emit playbackChanged();
 }
 void Backend::seek(qint64 p) {
   const auto target=qBound<qint64>(0,p,duration());
-  if(m_media.source().isEmpty()){m_savedPosition=target;emit positionChanged();}
-  else m_media.setPosition(target);
+  // Seeking out of the tail takes back the head start the next song was given.
+  if(m_crossfading || m_handoffIndex>=0){
+    const auto total=duration();
+    const qint64 window=qMax(qint64(crossfadeSeconds())*1000,qint64(2500));
+    if(total<=0 || total-target>window){endCrossfade(false);clearSpare();}
+  }
+  if(m_media().source().isEmpty()){m_savedPosition=target;emit positionChanged();}
+  else m_media().setPosition(target);
   emit positionChanged();
   emit seeked(target);
 }
@@ -945,8 +1008,132 @@ void Backend::resetLyrics(){
 void Backend::setVolume(double v) {
   v = qBound(0.0, v, 1.0);
   m_userVolume=v;
-  m_audio.setVolume(v*m_sleepGain);
+  applyOutputVolume();
   m_settings.setValue("volume", v);
+  emit settingsChanged();
+}
+void Backend::applyOutputVolume() {
+  // The mixer cannot exceed full scale, so a positive normalization gain only
+  // reaches quiet recordings while the user keeps headroom of their own.
+  // While an overlap is running the fade owns both mixers; it will pick the
+  // new level up on its next step.
+  if(!m_crossfading)activeAudio().setVolume(settledVolume());
+}
+// ReplayGain stores the correction directly; R128 stores Q7.8 units against
+// -23 LUFS, which this converts to the same -18 dBFS reference.
+double Backend::trackGainDb(const QVariantMap &track) {
+  bool ok=false;
+  for(const auto &key:{"replaygainTrackGain","replaygainAlbumGain"}) {
+    const auto raw=track.value(key).toString().trimmed();
+    if(raw.isEmpty())continue;
+    // Tags are written as "-7.25 dB" or plain "-7.25".
+    const double value=raw.split(' ').first().toDouble(&ok);
+    if(ok)return value;
+  }
+  const auto r128=track.value("r128TrackGain").toString().trimmed();
+  if(!r128.isEmpty()){const double value=r128.toDouble(&ok);if(ok)return value/256.0+5.0;}
+  return qQNaN();
+}
+double Backend::measuredLoudness(const QString &id) const {
+  const auto value=m_settings.value("loudness/"+id);
+  return value.isValid()?value.toDouble():qQNaN();
+}
+// One bounded, settings-backed cache per prefix. An invalid value forgets the
+// entry; otherwise the oldest is dropped once the cache is full.
+void Backend::rememberBounded(const QString &prefix,const QString &id,const QVariant &value,int limit) {
+  if(id.isEmpty())return;
+  auto order=m_settings.value(prefix+"Order").toStringList();
+  order.removeAll(id);
+  if(value.isValid()){order.append(id);m_settings.setValue(prefix+"/"+id,value);}
+  else m_settings.remove(prefix+"/"+id);
+  while(order.size()>limit)m_settings.remove(prefix+"/"+order.takeFirst());
+  m_settings.setValue(prefix+"Order",order);
+}
+void Backend::storeMeasuredLoudness() {
+  if(m_loudnessTrack.isEmpty()||!m_loudness.ready())return;
+  rememberBounded("loudness",m_loudnessTrack,m_loudness.levelDb(),2000);
+}
+double Backend::trackTrim(const QString &id) const {
+  if(id.isEmpty())return 0;
+  return qBound(-12.0,m_settings.value("trim/"+id,0.0).toDouble(),12.0);
+}
+void Backend::setTrackTrim(const QString &id,double decibels) {
+  if(id.isEmpty())return;
+  decibels=qBound(-12.0,decibels,12.0);
+  // Rounded so a slider cannot fill the cache with imperceptible neighbours.
+  decibels=qRound(decibels*2)/2.0;
+  if(qFuzzyCompare(decibels+1,trackTrim(id)+1))return;
+  rememberBounded("trim",id,qFuzzyIsNull(decibels)?QVariant():QVariant(decibels),2000);
+  if(id==current().value("id").toString())updateNormalization();
+  emit libraryChanged();
+}
+// Long recordings are the ones worth returning to: mixes, sets and live shows.
+bool Backend::longRecording(const QVariantMap &track) {
+  return track.value("seconds").toInt()>=1200;
+}
+qint64 Backend::resumePosition(const QString &id) const {
+  return id.isEmpty()?0:m_settings.value("resume/"+id,0).toLongLong();
+}
+void Backend::clearResumePosition(const QString &id) {
+  if(id.isEmpty()||!m_settings.contains("resume/"+id))return;
+  rememberBounded("resume",id,QVariant(),400);
+}
+void Backend::storeResumePosition() {
+  const auto track=current();const auto id=track.value("id").toString();
+  if(id.isEmpty()||!longRecording(track))return;
+  const auto at=position(),total=duration();
+  // Near either end there is nothing worth returning to.
+  if(at<60000||(total>0&&at>total-30000)){clearResumePosition(id);return;}
+  if(!resumeLongTracks())return;
+  rememberBounded("resume",id,at,400);
+}
+void Backend::setResumeLongTracks(bool enabled) {
+  if(resumeLongTracks()==enabled)return;
+  m_settings.setValue("resumeLongTracks",enabled);
+  emit settingsChanged();
+}
+void Backend::updateNormalization() {
+  const auto id=current().value("id").toString();
+  if(id!=m_loudnessTrack){storeMeasuredLoudness();m_loudness.reset();m_loudnessTrack=id;}
+  double gain=0;QString source;
+  if(volumeNormalization()&&!id.isEmpty()) {
+    const double tag=trackGainDb(current());
+    const double measured=measuredLoudness(id);
+    if(!qIsNaN(tag)){gain=tag;source="Track tag";}
+    else if(!qIsNaN(measured)){gain=-18.0-measured;source="Measured";}
+  }
+  // Boosting is limited because the mixer cannot amplify past full scale.
+  gain=qBound(-15.0,gain,6.0);
+  // A hand-set trim applies whether or not levelling is switched on.
+  const double trim=trackTrim(id);
+  const bool idle=source.isEmpty()&&qFuzzyIsNull(trim);
+  const double total=qBound(-15.0,gain+trim,6.0);
+  const double factor=idle?1.0:std::pow(10.0,total/20.0);
+  if(qFuzzyCompare(factor+1,m_normalizationGain+1)&&source==m_normalizationSource&&qFuzzyCompare(trim+1,m_trim+1))return;
+  m_normalizationGain=factor;m_normalizationDb=idle?0.0:total;m_normalizationSource=source;m_trim=trim;
+  applyOutputVolume();
+  emit normalizationChanged();
+}
+void Backend::setVolumeNormalization(bool enabled) {
+  if(volumeNormalization()==enabled)return;
+  m_settings.setValue("volumeNormalization",enabled);
+  updateNormalization();
+  emit settingsChanged();
+}
+QVariantMap Backend::colorScheme(const QColor &source,bool dark) const {
+  if(!source.isValid())return {};
+  const QPair<QRgb,bool> key{source.rgb(),dark};
+  // The seed animates between covers, so the same handful of colors comes back
+  // many times a second; a small cache keeps the theme off the solver.
+  if(const auto found=m_schemes.constFind(key);found!=m_schemes.constEnd())return *found;
+  if(m_schemes.size()>256)m_schemes.clear();
+  return *m_schemes.insert(key,m3::scheme(source,dark));
+}
+void Backend::setAccentColor(const QString &value) {
+  const QColor color(value.trimmed());
+  const auto stored=value.trimmed().isEmpty()?QString():color.isValid()?color.name(QColor::HexRgb):accentColor();
+  if(stored==accentColor())return;
+  m_settings.setValue("accentColor",stored);
   emit settingsChanged();
 }
 void Backend::setShuffle(bool v) {
@@ -982,10 +1169,11 @@ QString Backend::formatTime(qint64 ms) const {
 }
 void Backend::setSleep(int minutes) {
   m_sleepAtEnd=minutes==-1 && m_index>=0;
+  m_sleepAtQueueEnd=minutes==-2 && m_queue.count()>0;
   m_sleepTimer.stop();
   m_sleepTick.stop();
   m_sleepFadeStart.stop();m_sleepFadeTick.stop();
-  m_sleepGain=1; m_audio.setVolume(m_userVolume);
+  m_sleepGain=1; applyOutputVolume();
   if (minutes > 0) {
     m_sleepTimer.start(qMin(minutes,1440) * 60000);
     m_sleepTick.start();
@@ -996,6 +1184,7 @@ void Backend::setSleep(int minutes) {
 }
 QString Backend::sleepLabel() const {
   if(m_sleepAtEnd)return "End of track";
+  if(m_sleepAtQueueEnd)return "End of queue";
   return m_sleepTimer.isActive()
              ? QString::number((m_sleepTimer.remainingTime() + 59999) / 60000) +
                    " min"
@@ -1075,8 +1264,8 @@ void Backend::setUiActive(bool active) {
 }
 void Backend::localTestSource(const QUrl &url) {
   m_stopped=false;
-  m_media.setSource(url);
-  m_media.play();
+  m_media().setSource(url);
+  m_media().play();
 }
 
 void Backend::load() {
@@ -1091,6 +1280,7 @@ void Backend::load() {
   m_musicFolders=d.value("musicFolders").toStringList().mid(0,64);
   m_favorites = d.value("favorites").toList();
   m_history = d.value("history").toList();
+  refreshRecentlyPlayed();
   m_lastPlayed=d.value("lastPlayed").toMap();
   // Legacy history proves a play, but provides no trustworthy date.
   for(const auto &v:m_history)if(!m_lastPlayed.contains(itemId(v)))m_lastPlayed[itemId(v)]=0;
@@ -1142,6 +1332,7 @@ void Backend::recordHistory() {
   m_history.prepend(t);
   while (m_history.size() > 200)
     m_history.removeLast();
+  refreshRecentlyPlayed();
   emit libraryChanged();
   m_saveTimer.start();
 }
@@ -1234,6 +1425,7 @@ void Backend::clearHistory() {
   m_undoRows = m_history;m_undoLastPlayed=m_lastPlayed;m_lastPlayed.clear();
   m_undoMessage = "History cleared";
   m_history.clear();
+  refreshRecentlyPlayed();
   if (m_page == "library" && m_libraryId == "history")
     m_results.assign({});
   emit libraryChanged();
@@ -1334,6 +1526,7 @@ void Backend::undo() {
     emit trackChanged();
   } else if (m_undoType == "history") {
     m_history = m_undoRows;m_lastPlayed=m_undoLastPlayed;m_undoLastPlayed.clear();
+    refreshRecentlyPlayed();
     if (m_page == "library" && m_libraryId == "history")
       m_results.assign(m_history);
   } else if (m_undoType == "playlists") {
@@ -1425,6 +1618,30 @@ int Backend::lyricIndex() const {
   return end>0&&pos>=end ? -1 : low-1;
 }
 
+// How far playback has travelled across the line that is currently sung, from
+// 0 at its first syllable to 1 at its last, or -1 when no line is live.
+//
+// A line's end marks when it stops being the current line, which is not the
+// same as when it stops being sung. The last line of a song is held until the
+// audio runs out, and a solo can leave a line standing for a minute; filling
+// across either would creep rather than sing. So a line fills over the gap to
+// the next one, and a line with no such gap, or an unreasonably long one,
+// borrows the pace the rest of the song is sung at.
+double Backend::lyricProgress() const {
+  const int index=lyricIndex();
+  if(index<0 || index>=m_lyricLines.size())return -1;
+  const auto startOf=[this](int i){return m_lyricLines[i].toMap().value("start").toLongLong();};
+  QList<qint64> gaps;
+  for(int i=0;i+1<m_lyricLines.size();++i)
+    if(const auto gap=startOf(i+1)-startOf(i);gap>0)gaps.append(gap);
+  std::sort(gaps.begin(),gaps.end());
+  const qint64 typical=gaps.isEmpty()?4000:gaps[gaps.size()/2];
+  const qint64 start=startOf(index);
+  const qint64 gap=index+1<m_lyricLines.size()?startOf(index+1)-start:0;
+  const qint64 span=qMax(qint64(1),gap>0 && gap<=typical*4?gap:typical);
+  return qBound(0.0,double(position()+lyricOffset()-start)/double(span),1.0);
+}
+
 QVariantList Backend::audioDevices() const {
   QVariantList result{{QVariantMap{{"id",""},{"name","System default"}}}};
   for(const auto &device:QMediaDevices::audioOutputs())
@@ -1449,7 +1666,7 @@ void Backend::applyAudioDevice() {
   for(const auto &device:QMediaDevices::audioOutputs())if(QString::fromLatin1(device.id().toBase64())==audioDeviceId()){chosen=device;found=true;break;}
   // A disconnected device falls back immediately. It cannot steal playback if it reconnects.
   if(!found)m_settings.remove("audioDevice");
-  if(m_audio.device()!=chosen)m_audio.setDevice(chosen);
+  if(activeAudio().device()!=chosen)activeAudio().setDevice(chosen);
   m_outputId=chosen.id();m_outputDescription=chosen.description();
 }
 void Backend::playCollection(int index) {
@@ -1509,7 +1726,7 @@ QVariantMap Backend::collectionItem() const {
 
 void Backend::setPlaybackRate(double rate) {
   if(!std::isfinite(rate)||rate<0.5||rate>2.0)return;
-  m_settings.setValue("playbackRate",rate);m_media.setPlaybackRate(rate);
+  m_settings.setValue("playbackRate",rate);m_media().setPlaybackRate(rate);
 }
 void Backend::setLyricTextSize(int size) {
   size=qBound(20,size,32);if(size==lyricTextSize())return;
@@ -1541,14 +1758,14 @@ QString Backend::queueEnd() const {
 }
 bool Backend::pitchAdjustable() const {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-  return m_media.pitchCompensationAvailability()==QMediaPlayer::PitchCompensationAvailability::Available;
+  return m_media().pitchCompensationAvailability()==QMediaPlayer::PitchCompensationAvailability::Available;
 #else
   return false;
 #endif
 }
 bool Backend::preservePitch() const {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
-  return m_media.pitchCompensation();
+  return m_media().pitchCompensation();
 #else
   return false;
 #endif
@@ -1556,7 +1773,7 @@ bool Backend::preservePitch() const {
 void Backend::setPreservePitch(bool enabled) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
   if(!pitchAdjustable())return;
-  m_media.setPitchCompensation(enabled);m_settings.setValue("preservePitch",enabled);emit settingsChanged();
+  m_media().setPitchCompensation(enabled);m_settings.setValue("preservePitch",enabled);emit settingsChanged();
 #else
   Q_UNUSED(enabled);
 #endif
@@ -1762,7 +1979,9 @@ void Backend::importNextLocalBatch(){
   if(m_importFiles.isEmpty()){
     const auto message=m_scanLimited?QString("Scan limit reached. Add a smaller folder to continue.") : (m_importFailed+m_scanFailed)?QString("Import finished · %1 unreadable files or folders").arg(m_importFailed+m_scanFailed):QString("Import finished");
     m_scanLimited=false;m_scanFailed=0;
-    m_importTotal=0;m_relocateId.clear();emit localImportChanged();if(!m_quietFolderScan)emit toast(message);m_quietFolderScan=false;return;
+    m_importTotal=0;m_relocateId.clear();emit localImportChanged();
+    if(!m_m3uName.isEmpty()){m_quietFolderScan=false;finishM3uImport();return;}
+    if(!m_quietFolderScan)emit toast(message);m_quietFolderScan=false;return;
   }
   QStringList batch;int bytes=0;
   while(!m_importFiles.isEmpty()&&batch.size()<4&&bytes<16000){batch.append(m_importFiles.takeFirst());bytes+=batch.last().toUtf8().size()*2;}
@@ -1771,6 +1990,72 @@ void Backend::importNextLocalBatch(){
     for(const auto &v:items){auto track=v.toMap();if(!m_relocateId.isEmpty())track["id"]=m_relocateId;mergeLocalTrack(track);}
     emit localImportChanged();m_saveTimer.start();QTimer::singleShot(0,this,&Backend::importNextLocalBatch);
   });
+}
+// M3U is how playlists travel between players. Only local files can be named
+// in one: streaming ids are meaningless elsewhere, and server URLs would carry
+// credentials that library exports deliberately leave out.
+void Backend::exportPlaylistM3u(const QString &id,const QUrl &file) {
+  if(!file.isLocalFile()){notifyError("Choose a location on this computer.");return;}
+  QVariantMap playlist;
+  for(const auto &v:m_playlists)if(v.toMap().value("id")==id)playlist=v.toMap();
+  if(playlist.isEmpty()){notifyError("That playlist is no longer available.");return;}
+  const auto rows=playlistRows(playlist);
+  QByteArray out="#EXTM3U\n#PLAYLIST:"+playlist.value("title").toString().toUtf8()+"\n";
+  int written=0,skipped=0;
+  for(const auto &v:rows){
+    const auto track=v.toMap();const auto path=track.value("localPath").toString();
+    if(path.isEmpty()){++skipped;continue;}
+    const auto artist=track.value("artist").toString(),title=track.value("title").toString();
+    out+="#EXTINF:"+QByteArray::number(track.value("seconds").toInt())+","
+        +(artist.isEmpty()?title:artist+" - "+title).toUtf8()+"\n"+path.toUtf8()+"\n";
+    ++written;
+  }
+  if(!written){notifyError("That playlist has no local files to export.");return;}
+  QSaveFile target(file.toLocalFile());
+  if(!target.open(QIODevice::WriteOnly)||target.write(out)!=out.size()||!target.commit()){notifyError("Could not save that playlist file.");return;}
+  emit toast(skipped?QString("Exported %1 songs · %2 streamed songs skipped").arg(written).arg(skipped)
+                    :QString("Exported %1 songs").arg(written));
+}
+void Backend::importPlaylistM3u(const QUrl &file) {
+  if(importingLocal()){emit toast("An import is already running");return;}
+  const auto source=file.toLocalFile();
+  QFile input(source);
+  if(!file.isLocalFile()||!input.open(QIODevice::ReadOnly)||input.size()>4*1024*1024){notifyError("Could not read that playlist file.");return;}
+  const auto base=QFileInfo(source).absoluteDir();
+  QString name;QStringList entries;QSet<QString> seen;
+  while(!input.atEnd()&&entries.size()<5000){
+    const auto line=QString::fromUtf8(input.readLine()).trimmed();
+    if(line.isEmpty())continue;
+    if(line.startsWith('#')){if(line.startsWith("#PLAYLIST:"))name=line.mid(10).trimmed();continue;}
+    // Entries pointing at a server or a stream are not this computer's to import.
+    if(line.contains("://"))continue;
+    const auto resolved=QFileInfo(base.filePath(line)).absoluteFilePath();
+    if(!seen.contains(resolved)&&QFileInfo(resolved).isFile()){seen.insert(resolved);entries.append(resolved);}
+  }
+  input.close();
+  if(name.isEmpty())name=QFileInfo(source).completeBaseName();
+  if(entries.isEmpty()){notifyError("That playlist lists no audio files on this computer.");return;}
+  m_m3uName=name.left(120);m_m3uPaths=entries;
+  QVariantList urls;for(const auto &entry:entries)urls.append(QUrl::fromLocalFile(entry).toString());
+  importLocalFiles(urls);
+  if(!importingLocal())finishM3uImport();
+}
+void Backend::finishM3uImport() {
+  if(m_m3uName.isEmpty())return;
+  const auto name=m_m3uName;const auto paths=m_m3uPaths;
+  m_m3uName.clear();m_m3uPaths.clear();
+  QHash<QString,QVariantMap> byPath;
+  for(const auto &v:m_localTracks){const auto track=v.toMap();byPath.insert(track.value("localPath").toString(),track);}
+  QVariantList tracks;
+  for(const auto &path:paths)if(byPath.contains(path))tracks.append(byPath.value(path));
+  if(tracks.isEmpty()){notifyError("None of that playlist's files could be read.");return;}
+  invalidateUndo("playlists");
+  m_undoType="playlists";m_undoRows=m_playlists;m_undoMessage="Playlist imported";
+  const auto id=QUuid::createUuid().toString(QUuid::WithoutBraces);
+  m_playlists.append(QVariantMap{{"id",id},{"title",name},{"tracks",tracks}});
+  emit libraryChanged();m_saveTimer.start();
+  emit toast(QString("Imported %1 · %2 songs").arg(name).arg(tracks.size()));
+  openPlaylist(id);
 }
 void Backend::mergeLocalTrack(QVariantMap track){
   if(m_relocateId.isEmpty())for(const auto &v:m_localTracks)if(v.toMap().value("localPath")==track.value("localPath")){track["id"]=v.toMap().value("id");break;}
@@ -1921,8 +2206,17 @@ QString Backend::saveSmartPlaylist(const QString &id,const QString &name,const Q
   if(!id.isEmpty() && (index<0 || !m_playlists[index].toMap().contains("rules")))return {};
   auto source=input.value("source").toString();if(!QStringList{"local","youtube","subsonic"}.contains(source))source="any";
   int days=input.value("days").toInt();if(!QList<int>{0,-1,7,30,90,365}.contains(days))days=0;
+  // Ranges are stored only when both ends make sense, so an empty field never
+  // silently excludes every song that simply has no year or duration tag.
+  const int yearFrom=qBound(0,input.value("yearFrom").toInt(),9999);
+  const int yearTo=qBound(0,input.value("yearTo").toInt(),9999);
+  const int shortest=qBound(0,input.value("minSeconds").toInt(),36000);
+  const int longest=qBound(0,input.value("maxSeconds").toInt(),36000);
   const QVariantMap rules{{"artist",input.value("artist").toString().trimmed().left(120)},
-    {"title",input.value("title").toString().trimmed().left(120)},{"source",source},
+    {"title",input.value("title").toString().trimmed().left(120)},
+    {"album",input.value("album").toString().trimmed().left(120)},{"source",source},
+    {"yearFrom",yearFrom},{"yearTo",yearTo<yearFrom?0:yearTo},
+    {"minSeconds",shortest},{"maxSeconds",longest<shortest?0:longest},
     {"likedOnly",input.value("likedOnly").toBool()},{"days",days}};
   const auto key=id.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):id;
   const QVariantMap p{{"id",key},{"title",name.trimmed().left(120)},{"rules",rules},{"tracks",QVariantList{}}};
@@ -1941,6 +2235,18 @@ QVariantList Backend::playlistRows(const QVariantMap &p) const {
   const int days=rules.value("days").toInt();const auto cutoff=QDateTime::currentSecsSinceEpoch()-qint64(days)*86400;
   for(const auto &v:candidates){const auto t=v.toMap();const auto id=itemId(v);if(id.isEmpty()||seen.contains(id))continue;seen.insert(id);
     if(!t.value("artist").toString().contains(rules.value("artist").toString(),Qt::CaseInsensitive) || !t.value("title").toString().contains(rules.value("title").toString(),Qt::CaseInsensitive))continue;
+    if(!t.value("album").toString().contains(rules.value("album").toString(),Qt::CaseInsensitive))continue;
+    const int yearFrom=rules.value("yearFrom").toInt(),yearTo=rules.value("yearTo").toInt();
+    if(yearFrom||yearTo){
+      // A song with no year cannot satisfy a year rule.
+      const int year=t.value("year").toString().left(4).toInt();
+      if(!year||(yearFrom&&year<yearFrom)||(yearTo&&year>yearTo))continue;
+    }
+    const int shortest=rules.value("minSeconds").toInt(),longest=rules.value("maxSeconds").toInt();
+    if(shortest||longest){
+      const int seconds=t.value("seconds").toInt();
+      if(seconds<=0||(shortest&&seconds<shortest)||(longest&&seconds>longest))continue;
+    }
     const auto source=isServerSource(t.value("source"))?"subsonic":!t.value("localPath").toString().isEmpty()?"local":"youtube";
     const auto wanted=rules.value("source","any").toString();if(wanted!="any" && wanted!=source)continue;
     if(rules.value("likedOnly").toBool() && !(isServerSource(t.value("source"))?m_server.isStarred(id):likedIds.contains(id)))continue;
@@ -1953,20 +2259,41 @@ QVariantList Backend::playlistRows(const QVariantMap &p) const {
 QVariantList Backend::trackDetails(const QVariantMap &track) const {
   QVariantList result;
   const auto add=[&](const QString &label,const QString &value){if(!value.isEmpty())result.append(QVariantMap{{"label",label},{"value",value}});};
-  add("Title",track.value("title").toString());add("Artist",track.value("artist").toString());add("Album",track.value("album").toString());
+  add("Title",track.value("title").toString());add("Artist",track.value("artist").toString());
+  const auto albumArtist=track.value("albumArtist").toString();
+  if(!albumArtist.isEmpty() && albumArtist!=track.value("artist").toString())add("Album artist",albumArtist);
+  add("Album",track.value("album").toString());
+  add("Composer",track.value("composer").toString());
+  add("Genre",track.value("genre").toString());
+  add("Year",track.value("year").toString());
+  const int trackNumber=track.value("trackNumber").toInt(),discNumber=track.value("discNumber").toInt();
+  if(trackNumber>0)add("Track",discNumber>0?QString("%1 on disc %2").arg(trackNumber).arg(discNumber):QString::number(trackNumber));
+  else if(discNumber>0)add("Disc",QString::number(discNumber));
   const auto path=track.value("localPath").toString();
   add("Source",isServerSource(track.value("source"))?"Music server":path.isEmpty()?"YouTube Music":"Local file");
   const int seconds=track.value("seconds").toInt();if(seconds>0)add("Duration",QString("%1:%2").arg(seconds/60).arg(seconds%60,2,10,QChar('0')));
   if(!path.isEmpty()) {const QFileInfo file(path);add("File",path);add("Format",file.suffix().toUpper());add("Available",file.isFile()?"Yes":"File missing");if(file.isFile())add("Size",QLocale().formattedDataSize(file.size()));}
-  if(track.value("id")==current().value("id") && !m_media.source().isEmpty()){
-    const auto meta=m_media.metaData();add("Playback codec",meta.stringValue(QMediaMetaData::AudioCodec));
+  if(track.value("id")==current().value("id") && !m_media().source().isEmpty()){
+    const auto meta=m_media().metaData();add("Playback codec",meta.stringValue(QMediaMetaData::AudioCodec));
     const auto bitrate=meta.value(QMediaMetaData::AudioBitRate).toInt();if(bitrate>0)add("Playback bitrate",QString("%1 kb/s").arg(bitrate/1000));
     if(m_decodeRate>0)add("Decoded sample rate",QString("%1 kHz").arg(m_decodeRate/1000.0,0,'g',6));
     if(m_decodeChannels>0)add("Decoded channels",QString::number(m_decodeChannels));
   }
   add("File codec",track.value("codec").toString());
+  if(volumeNormalization()) {
+    const double tag=trackGainDb(track);
+    const double measured=measuredLoudness(track.value("id").toString());
+    if(!qIsNaN(tag))add("Volume normalization",QString("%1 dB · track tag").arg(qBound(-15.0,tag,6.0),0,'f',1));
+    else if(!qIsNaN(measured))add("Volume normalization",QString("%1 dB · measured").arg(qBound(-15.0,-18.0-measured,6.0),0,'f',1));
+    else add("Volume normalization","Not measured yet");
+  }
+  const double trim=trackTrim(track.value("id").toString());
+  if(!qFuzzyIsNull(trim))add("Volume trim",QString("%1%2 dB").arg(trim>0?"+":"").arg(trim,0,'f',1));
   if(track.value("sampleRate").toInt()>0)add("File sample rate",QString("%1 kHz").arg(track.value("sampleRate").toInt()/1000.0,0,'g',6));
   if(track.value("bitrate").toInt()>0)add("File bitrate",QString("%1 kb/s").arg(track.value("bitrate").toInt()/1000));
+  if(const int depth=track.value("bitDepth").toInt();depth>0)add("File bit depth",QString("%1-bit").arg(depth));
+  if(const int channels=track.value("channels").toInt();channels>0)
+    add("File channels",channels==1?"Mono":channels==2?"Stereo":QString("%1 channels").arg(channels));
   return result;
 }
 
@@ -2039,10 +2366,12 @@ void Backend::updateSleepGain() {
   qint64 remaining=-1;
   if(sleepFade()) {
     if(m_sleepTimer.isActive())remaining=m_sleepTimer.remainingTime();
-    else if(m_sleepAtEnd && duration()>0)remaining=qMax<qint64>(0,duration()-position())/playbackRate();
+    // End of queue fades over the last track, exactly as end of track does.
+    else if((m_sleepAtEnd||(m_sleepAtQueueEnd&&!shuffle()&&repeat()==0&&m_index+1>=m_queue.count())) && duration()>0)
+      remaining=qMax<qint64>(0,duration()-position())/playbackRate();
   }
   m_sleepGain=remaining<0?1.0:qBound(0.0,remaining/30000.0,1.0);
-  m_audio.setVolume(m_userVolume*m_sleepGain);
+  applyOutputVolume();
 }
 void Backend::playGroup(const QString &key,bool folders) {
   QVariantList songs;
@@ -2053,4 +2382,210 @@ void Backend::playGroup(const QString &key,bool folders) {
   }
   songs=playable(songs);if(songs.isEmpty())return;
   invalidateUndo("queue");m_queue.reconcile(queueWithOrigin(songs,"collection"));playAt(0);
+}
+
+// --- Crossfade and gapless handover -----------------------------------------
+//
+// The spare deck is loaded with the next song before the current one runs out.
+// With an overlap configured, both play while their volumes trade places on an
+// equal-power curve, so the pair keeps a steady loudness through the change.
+// With no overlap, the spare simply starts the instant the other stops, which
+// removes the pause the media pipeline would otherwise spend loading.
+//
+// Either way the decks swap roles. Nothing is handed between them part-way
+// through a song, so neither side has a seam.
+
+void Backend::setCrossfadeSeconds(int seconds) {
+  seconds=qBound(0,seconds,12);
+  if(seconds==crossfadeSeconds())return;
+  m_settings.setValue("crossfadeSeconds",seconds);
+  if(seconds==0)endCrossfade(false);
+  clearSpare();
+  emit settingsChanged();
+}
+
+void Backend::setGapless(bool enabled) {
+  if(gapless()==enabled)return;
+  m_settings.setValue("gapless",enabled);
+  if(!enabled)clearSpare();
+  emit settingsChanged();
+}
+
+// Which queue position the handover should aim at, or -1 when there is nothing
+// to aim at. Shuffle picks its destination here rather than at the last moment,
+// because the deck has to be loaded with a decision already made.
+int Backend::handoffTarget() {
+  if(m_queue.count()<2 || repeat()==2)return -1;
+  if(shuffle()){
+    int i=m_index,guard=0;
+    while(i==m_index && ++guard<64)i=QRandomGenerator::global()->bounded(m_queue.count());
+    return i==m_index?-1:i;
+  }
+  if(m_index+1<m_queue.count())return m_index+1;
+  if(repeat()==1)return 0;
+  return -1;
+}
+
+// A source the spare deck can start from without going back to the network.
+// Anything that would still need resolving simply does not get a head start,
+// and the ordinary transition carries it instead.
+QUrl Backend::readySource(const QVariantMap &track) const {
+  const auto local=track.value("localPath").toString();
+  if(!local.isEmpty()){
+    const QFileInfo file(local);
+    return file.isFile() && file.isReadable() ? QUrl::fromLocalFile(file.absoluteFilePath()) : QUrl();
+  }
+  const auto id=track.value("videoId").toString();
+  if(id.isEmpty() || id!=m_preparedId || m_preparedData.isEmpty())return {};
+  const auto file=m_preparedData.value("file").toString();
+  if(!file.isEmpty() && QFileInfo(file).isFile())return QUrl::fromLocalFile(file);
+  const QUrl url(m_preparedData.value("url").toString());
+  return url.scheme()=="https" ? url : QUrl();
+}
+
+bool Backend::armHandoff(bool playImmediately) {
+  const int target=handoffTarget();
+  if(target<0)return false;
+  const auto track=m_queue.get(target);
+  const auto source=readySource(track);
+  if(!source.isValid() || source.isEmpty())return false;
+  auto &deck=spareDeck();
+  deck.stop();
+  deck.setSource(source);
+  deck.setPlaybackRate(m_media().playbackRate());
+  spareAudio().setDevice(activeAudio().device());
+  spareAudio().setVolume(0);
+  m_handoffIndex=target;
+  m_handoffPrepared=track.value("localPath").toString().isEmpty();
+  if(playImmediately)deck.play();
+  return true;
+}
+
+void Backend::clearSpare() {
+  auto &deck=spareDeck();
+  deck.stop();
+  deck.setSource(QUrl());
+  spareAudio().setVolume(0);
+  m_handoffIndex=-1;
+  m_handoffPrepared=false;
+}
+
+void Backend::considerCrossfade() {
+  if(!playing() || m_resolving)return;
+  const auto total=m_media().duration();
+  if(total<=0)return;
+  const qint64 remaining=total-m_media().position();
+  if(remaining<0)return;
+  const int seconds=crossfadeSeconds();
+  if(seconds>0){
+    const qint64 window=qint64(seconds)*1000;
+    // A recording shorter than two overlaps would be mostly overlap.
+    if(total<window*2 || m_crossfading || remaining>window)return;
+    beginCrossfade(int(window));
+    return;
+  }
+  // No overlap: the spare still warms up, so the change is not a pause.
+  if(!gapless() || m_handoffIndex>=0 || remaining>2500)return;
+  armHandoff(false);
+}
+
+void Backend::beginCrossfade(int milliseconds) {
+  if(!armHandoff(true))return;
+  m_crossfading=true;
+  m_crossfadeMs=qMax(200,milliseconds);
+  m_crossfadeClock.restart();
+  m_crossfadeTick.start();
+  emit playbackChanged();
+}
+
+void Backend::stepCrossfade() {
+  if(!m_crossfading)return;
+  const double t=qBound(0.0,double(m_crossfadeClock.elapsed())/double(m_crossfadeMs),1.0);
+  // Equal power. Two linear ramps would dip in the middle, where both songs are
+  // half volume; sine and cosine keep the sum of their powers constant.
+  const double settled=settledVolume();
+  activeAudio().setVolume(qBound(0.0,settled*std::cos(t*M_PI/2),1.0));
+  spareAudio().setVolume(qBound(0.0,settled*std::sin(t*M_PI/2),1.0));
+  if(t>=1.0)endCrossfade(true);
+}
+
+void Backend::endCrossfade(bool completed) {
+  m_crossfadeTick.stop();
+  if(!m_crossfading){
+    if(!completed)clearSpare();
+    return;
+  }
+  m_crossfading=false;
+  const int target=m_handoffIndex;
+  if(!completed || target<0){
+    clearSpare();
+    updateNormalization();
+    emit playbackChanged();
+    return;
+  }
+  adoptHandoff(target);
+}
+
+// The spare deck has been playing the next song for a moment; make it the deck
+// the rest of the application is looking at, and move the queue with it.
+void Backend::adoptHandoff(int index) {
+  if(index<0 || index>=m_queue.count()){clearSpare();return;}
+  // The song that just finished has nothing to return to.
+  clearResumePosition(current().value("id").toString());
+  const bool wasPrepared=m_handoffPrepared;
+  m_handoffIndex=-1;
+  m_handoffPrepared=false;
+
+  auto &leaving=m_media();
+  m_usingB=!m_usingB;
+  leaving.stop();
+  leaving.setSource(QUrl());
+  spareAudio().setVolume(0);
+
+  invalidateUndo("queue-order");
+  cancel("play");cancel("linkplay");cancel("lyrics");cancel("radio");
+  m_wantPlay=true;m_stopped=false;m_recoveryAttempts=0;m_recovering=false;
+  ++m_trackToken;
+  m_savedPosition=0;
+  m_playbackDirection=1;
+  m_index=index;
+  // A prepared stream lives in a temporary directory the player now depends on.
+  if(wasPrepared){
+    if(m_preparedDirectory)m_audioCache=std::move(m_preparedDirectory);
+    m_preparedData.clear();m_preparedId.clear();
+  }
+  dismissError();
+  m_retry=false;
+  m_restorePosition=0;
+  m_resolving=false;
+  m_lyricsLoaded=false;m_lyricsSource.clear();m_lyrics.clear();m_lyricLines.clear();m_lyricsBusy=false;
+  resetAudioLevels();
+  emit lyricsChanged();
+  emit trackChanged();
+  emit libraryChanged();
+  // Nothing transitioned from stopped to playing, so the bookkeeping that
+  // normally rides on that change has to be asked for.
+  recordHistory();
+  notifyTrack();
+  updateNormalization();
+  if(m_uiActive)m_positionTick.start();
+  emit positionChanged();
+  emit playbackChanged();
+  m_saveTimer.start();
+}
+
+// Called when a song ends with no overlap configured. Returns true when the
+// waiting deck took over, so the ordinary advance is not also run.
+bool Backend::finishGapless() {
+  if(m_handoffIndex<0 || !gapless() || crossfadeSeconds()>0)return false;
+  const int target=m_handoffIndex;
+  if(target<0 || target>=m_queue.count()){clearSpare();return false;}
+  auto &deck=spareDeck();
+  if(deck.mediaStatus()==QMediaPlayer::NoMedia || deck.mediaStatus()==QMediaPlayer::InvalidMedia){
+    clearSpare();return false;
+  }
+  spareAudio().setVolume(settledVolume());
+  deck.play();
+  adoptHandoff(target);
+  return true;
 }

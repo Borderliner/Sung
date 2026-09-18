@@ -11,7 +11,11 @@ Item {
     readonly property bool popupVisible: immersiveVolume.popupVisible || layoutMenu.visible
     readonly property bool volumePopupVisible: immersiveVolume.popupVisible
     readonly property bool hasLyrics: !!app.lyrics || app.lyricLines.length>0
-    readonly property string effectiveLayout: hasLyrics && ["split","lyrics"].indexOf(preferredLayout)>=0 ? preferredLayout : "artwork"
+    // Singing along needs to know when each line starts, so it asks for more
+    // than the reading layouts do and falls back when a song cannot give it.
+    readonly property bool hasTimedLyrics: app.lyricLines.length>0
+    readonly property string effectiveLayout: preferredLayout==="singalong" ? (hasTimedLyrics?"singalong":"artwork")
+        : hasLyrics && ["split","lyrics"].indexOf(preferredLayout)>=0 ? preferredLayout : "artwork"
     property string displayedLayout: effectiveLayout
     property bool ready: false
     property bool autoHideControls: false
@@ -22,7 +26,8 @@ Item {
     property real detailsOpacity: coverHidden ? 0 : 1
     readonly property var artistTarget: app.relatedCollection(app.current,"artist")
     readonly property var albumTarget: app.relatedCollection(app.current,"album")
-    readonly property real coverSize: Math.max(80,Math.min(displayedLayout==="artwork"?520:420,width*(displayedLayout==="artwork"?0.55:0.34),height-500))
+    readonly property real coverflowReserve: coverflowVisible ? upNext.reserved+16 : 0
+    readonly property real coverSize: Math.max(80,Math.min(displayedLayout==="artwork"?520:420,width*(displayedLayout==="artwork"?0.55:0.34),height-500-coverflowReserve))
     signal exitRequested()
     signal speedRequested()
     signal timingRequested()
@@ -31,6 +36,9 @@ Item {
     signal layoutRequested(string layout)
     signal queueRequested()
     signal collectionRequested(var item)
+    signal coverflowRequested(bool enabled)
+    property bool coverflow: false
+    readonly property bool coverflowVisible: coverflow && app.queue.count>0
     function hasKeyboardFocus(item) {
         for(let p=item;p && p!==player;p=p.parent)
             if(p.visualFocus===true || p.handlesTextInput===true)return true;
@@ -68,6 +76,7 @@ Item {
     }
     Behavior on detailsOpacity { NumberAnimation { duration: Theme.exitDuration; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.effectsCurve } }
     NumberAnimation on opacity { from: 0; to: 1; duration: Theme.normal; easing.type: Easing.BezierSpline; easing.bezierCurve: Theme.effectsCurve }
+    AmbientBackdrop { anchors.fill: parent; url: app.current.art || "" }
     ColumnLayout {
         anchors.fill: parent; anchors.margins: player.width<900?24:40; spacing: 20
         RowLayout {
@@ -77,7 +86,7 @@ Item {
             MButton { objectName: "exitImmersiveButton"; symbol: "back"; tip: "Exit immersive · Esc"; onClicked: player.exitRequested() }
             Item { Layout.fillWidth: true }
             MButton {id:layoutButton;objectName:"immersiveLayoutButton";symbol:"more";tip:"Immersive layout";selected:layoutMenu.visible;onClicked:layoutMenu.popup(layoutButton,width-layoutMenu.width,height+4)}
-            MButton { objectName: "immersiveLyricSearchButton"; symbol: "search"; tip: "Find in lyrics"; enabled: player.hasLyrics; onClicked: player.showLyricsSearch() }
+            MButton { objectName: "immersiveLyricSearchButton"; symbol: "search"; tip: "Find in lyrics"; enabled: player.hasLyrics && player.displayedLayout!=="singalong"; onClicked: player.showLyricsSearch() }
             MButton { text: Number(app.playbackRate.toFixed(2))+"×"; tip: "Playback speed"; onClicked: player.speedRequested() }
             MButton { symbol: "settings"; tip: "Lyric timing · saved for this song"; visible: app.lyricLines.length>0; onClicked: player.timingRequested() }
             MButton { symbol: "heart"; selected: app.liked; tip: app.liked?"Unlike":"Like"; enabled: app.currentIndex>=0; onClicked: app.toggleLike(app.current) }
@@ -87,7 +96,7 @@ Item {
             Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; spacing: Math.max(24,player.width*0.055)
             Item {Layout.fillWidth:true;visible:player.displayedLayout==="artwork"}
             ColumnLayout {
-                visible:player.displayedLayout!=="lyrics"
+                visible:player.displayedLayout!=="lyrics" && player.displayedLayout!=="singalong"
                 Layout.preferredWidth: player.coverSize; Layout.minimumWidth: player.coverSize; Layout.maximumWidth: player.coverSize; Layout.fillHeight: true; Layout.minimumHeight: 0; spacing: 12
                 Item { Layout.fillHeight: true }
                 Artwork { id: immersiveArt; objectName: "immersiveArtwork"; Layout.preferredWidth: player.coverSize; Layout.preferredHeight: player.coverSize; Layout.maximumHeight: player.coverSize; url: app.current.art || ""; motionUrl: app.currentMotionArt; crossfade:true; opacity: player.coverHidden?0:1; radius: 28; pixels: 850; highResolution: true; fit:app.currentArtworkFit
@@ -113,7 +122,17 @@ Item {
                 Item { Layout.fillHeight: true }
             }
             Item {Layout.fillWidth:true;visible:player.displayedLayout==="artwork"}
-            LyricsView { id: immersiveLyrics; expanded: true; visible:player.displayedLayout!=="artwork"; Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.fillHeight: true; Layout.minimumHeight: 0 }
+            LyricsView { id: immersiveLyrics; expanded: true; visible:player.displayedLayout!=="artwork" && player.displayedLayout!=="singalong"; Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.fillHeight: true; Layout.minimumHeight: 0 }
+            SingAlong { id: immersiveSingAlong; visible:player.displayedLayout==="singalong"; Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.fillHeight: true; Layout.minimumHeight: 0 }
+        }
+        ImmersiveCoverflow {
+            id: upNext
+            Layout.fillWidth: true
+            Layout.preferredHeight: reserved
+            visible: player.coverflowVisible
+            opacity: player.controlsShown?1:0
+            Behavior on opacity {NumberAnimation {duration:Theme.normal;easing.type:Easing.BezierSpline;easing.bezierCurve:Theme.effectsCurve}}
+            onShowAllRequested: player.queueRequested()
         }
         RowLayout {
             Layout.alignment: Qt.AlignHCenter; spacing: 16; opacity:player.controlsShown?1:0
@@ -138,10 +157,14 @@ Item {
         id:layoutMenu;objectName:"immersiveLayoutMenu"
         onClosed:{layoutButton.forceActiveFocus(Qt.PopupFocusReason);player.wake();}
         Repeater {
-            model:[{key:"artwork",label:"Artwork"},{key:"lyrics",label:"Lyrics"},{key:"split",label:"Split"}]
-            MMenuItem {required property var modelData;objectName:"immersiveLayout_"+modelData.key;text:modelData.label;checkable:true;checked:player.preferredLayout===modelData.key;onTriggered:player.layoutRequested(modelData.key)}
+            model:[{key:"artwork",label:"Artwork"},{key:"lyrics",label:"Lyrics"},{key:"split",label:"Split"},{key:"singalong",label:"Sing along"}]
+            MMenuItem {required property var modelData;objectName:"immersiveLayout_"+modelData.key;text:modelData.label;checkable:true
+                // Offered only where the song can actually drive it.
+                enabled:modelData.key!=="singalong" || player.hasTimedLyrics
+                checked:player.preferredLayout===modelData.key;onTriggered:player.layoutRequested(modelData.key)}
         }
         MDivider {}
+        MMenuItem {objectName:"immersiveCoverflowToggle";text:"Up next covers";checkable:true;checked:player.coverflow;onTriggered:player.coverflowRequested(!player.coverflow)}
         MMenuItem {objectName:"immersiveAutoHide";text:"Auto-hide controls";checkable:true;checked:player.autoHideControls;onTriggered:player.autoHideRequested(!player.autoHideControls)}
     }
 }

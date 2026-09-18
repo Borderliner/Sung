@@ -49,3 +49,21 @@ void runImmersivePolishTests(Backend*,QQuickWindow*);
 
 void runImmersiveEdgeTests(Backend*,QQuickWindow*);
 void runImmersivePreferencesTest(Backend*,QQuickWindow*);
+
+void runAmbientImmersiveTests(Backend*,QQuickWindow*);
+void runPersonalizationTests(Backend*,QQuickWindow*);
+void runHomeRailTests(Backend*,QQuickWindow*);
+void runOnboardingTests(Backend*,QQuickWindow*);
+void runLibraryExchangeTests(Backend*,QQuickWindow*);
+void runBackdropPulseTests(Backend*,QQuickWindow*);
+void runPlaybackMemoryTests(Backend*,QQuickWindow*);
+void runInterfaceAuditTests(Backend*,QQuickWindow*);
+
+void runTourCapture(Backend*,QQuickWindow*);
+void runDynamicColorTests(Backend*,QQuickWindow*);
+void runNavigationMotionTests(Backend*,QQuickWindow*);
+void runArtistHeroTests(Backend*,QQuickWindow*);
+void runSingAlongTests(Backend*,QQuickWindow*);
+void runCrossfadeUiTests(Backend*,QQuickWindow*);
+void runTrackDetailsTests(Backend*,QQuickWindow*);
+void runQueueHistoryTests(Backend*,QQuickWindow*);

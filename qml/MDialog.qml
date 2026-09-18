@@ -5,6 +5,11 @@ Dialog {
     property bool acceptEnabled: true
     property string acceptText: ""
     property Item initialFocus: null
+    // M3 dialogs separate scrollable content from the actions with a divider,
+    // so a clipped edge reads as "more below" rather than as a cut-off.
+    property Flickable scrollSource: null
+    readonly property bool moreBelow: !!scrollSource && scrollSource.contentHeight > scrollSource.height+1
+                                      && scrollSource.contentY < scrollSource.contentHeight-scrollSource.height-1
     focus: true
     onOpened: if (initialFocus) initialFocus.forceActiveFocus(Qt.TabFocusReason)
     padding: 24
@@ -19,7 +24,16 @@ Dialog {
         alignment: Qt.AlignRight
         buttonLayout: DialogButtonBox.AndroidLayout
         padding: 24; spacing: 8
-        background: null
+        background: Item {
+            Rectangle {
+                objectName: "dialogScrollDivider"
+                anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+                height: 1; color: Theme.outline
+                visible: dialog.moreBelow
+                opacity: visible ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: Theme.fast } }
+            }
+        }
         delegate: MButton {
             objectName: dialog.objectName + "_button_" + DialogButtonBox.buttonRole
             readonly property bool confirming: DialogButtonBox.buttonRole === DialogButtonBox.AcceptRole || DialogButtonBox.buttonRole === DialogButtonBox.YesRole

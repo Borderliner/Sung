@@ -118,6 +118,9 @@ int main(int argc, char **argv) {
   MotionArtwork motionArtwork;
   qmlRegisterUncreatableType<MotionArtwork>("Sung.Native",1,0,"MotionArtwork","Shared current artwork");
   Backend backend;
+  // Tests, smoke runs and screenshots start from a clean profile; none of
+  // them should have to dismiss the first-run flow.
+  if (args.contains("--isolated")) backend.setOnboarded(true);
   RoundedArt::resolveServerArt=[&backend](const QUrl &url){return backend.server()->artworkRequest(url);};
   QObject::connect(backend.server(),&MusicServer::accountChanged,&app,[]{RoundedArt::clearCaches();});
   DesktopTheme desktopTheme;
@@ -176,6 +179,22 @@ int main(int argc, char **argv) {
   }
   if(args.contains("--immersive-edges-test")){QTimer::singleShot(0,&app,[&]{runImmersiveEdgeTests(&backend,window);});return app.exec();}
   if(args.contains("--immersive-preferences-test")){QTimer::singleShot(0,&app,[&]{runImmersivePreferencesTest(&backend,window);});return app.exec();}
+  if(args.contains("--queue-history-test")){QTimer::singleShot(0,&app,[&]{runQueueHistoryTests(&backend,window);});return app.exec();}
+  if(args.contains("--track-details-test")){QTimer::singleShot(0,&app,[&]{runTrackDetailsTests(&backend,window);});return app.exec();}
+  if(args.contains("--crossfade-ui-test")){QTimer::singleShot(0,&app,[&]{runCrossfadeUiTests(&backend,window);});return app.exec();}
+  if(args.contains("--singalong-test")){QTimer::singleShot(0,&app,[&]{runSingAlongTests(&backend,window);});return app.exec();}
+  if(args.contains("--artist-hero-test")){QTimer::singleShot(0,&app,[&]{runArtistHeroTests(&backend,window);});return app.exec();}
+  if(args.contains("--navigation-motion-test")){QTimer::singleShot(0,&app,[&]{runNavigationMotionTests(&backend,window);});return app.exec();}
+  if(args.contains("--dynamic-color-test")){QTimer::singleShot(0,&app,[&]{runDynamicColorTests(&backend,window);});return app.exec();}
+  if(args.contains("--tour")){QTimer::singleShot(0,&app,[&]{runTourCapture(&backend,window);});return app.exec();}
+  if(args.contains("--interface-audit-test")){QTimer::singleShot(0,&app,[&]{runInterfaceAuditTests(&backend,window);});return app.exec();}
+  if(args.contains("--playback-memory-test")){QTimer::singleShot(0,&app,[&]{runPlaybackMemoryTests(&backend,window);});return app.exec();}
+  if(args.contains("--library-exchange-test")){QTimer::singleShot(0,&app,[&]{runLibraryExchangeTests(&backend,window);});return app.exec();}
+  if(args.contains("--backdrop-pulse-test")){QTimer::singleShot(0,&app,[&]{runBackdropPulseTests(&backend,window);});return app.exec();}
+  if(args.contains("--home-rail-test")){QTimer::singleShot(0,&app,[&]{runHomeRailTests(&backend,window);});return app.exec();}
+  if(args.contains("--onboarding-test")){QTimer::singleShot(0,&app,[&]{runOnboardingTests(&backend,window);});return app.exec();}
+  if(args.contains("--ambient-immersive-test")){QTimer::singleShot(0,&app,[&]{runAmbientImmersiveTests(&backend,window);});return app.exec();}
+  if(args.contains("--personalization-test")){QTimer::singleShot(0,&app,[&]{runPersonalizationTests(&backend,window);});return app.exec();}
   if(args.contains("--immersive-polish-test")){QTimer::singleShot(0,&app,[&]{runImmersivePolishTests(&backend,window);});return app.exec();}
   if(args.contains("--interaction-refinement-test")){QTimer::singleShot(0,&app,[&]{runInteractionRefinementTests(&backend,window);});return app.exec();}
   if(args.contains("--listening-refinement-test")){QTimer::singleShot(0,&app,[&]{runListeningRefinementTests(&backend,window);});return app.exec();}

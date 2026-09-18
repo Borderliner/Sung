@@ -37,8 +37,14 @@ MDialog {
         }
     }
     }
+    scrollSource: connectionScroll.contentItem
     footer: Item {
         implicitHeight: 96
+        Rectangle {
+            objectName: "dialogScrollDivider"
+            anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+            height: 1; color: Theme.outline; visible: dialog.moreBelow
+        }
         Row {
             anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 24; spacing: 8
             MButton { text: "Close"; ink: Theme.primary; onClicked: dialog.close() }

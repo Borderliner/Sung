@@ -86,6 +86,28 @@ if ready:
     stage("library-qol",[str(build/"sung"),"--isolated","--library-qol-test"],60,e)
     e=profile("visual-polish-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"visual-polish"))
     stage("visual-polish",[str(build/"sung"),"--isolated","--visual-polish-test"],40,e)
+    e=profile("ambient-immersive-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"ambient-immersive"))
+    stage("ambient-immersive",[str(build/"sung"),"--isolated","--ambient-immersive-test"],180,e)
+    e=profile("personalization-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"personalization"))
+    stage("personalization",[str(build/"sung"),"--isolated","--personalization-test"],180,e)
+    e=profile("home-rail-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"home-rail"))
+    stage("home-rail",[str(build/"sung"),"--isolated","--home-rail-test"],180,e)
+    e=profile("onboarding-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"onboarding"))
+    stage("onboarding",[str(build/"sung"),"--isolated","--onboarding-test"],180,e)
+    e=profile("library-exchange-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"library-exchange"))
+    stage("library-exchange",[str(build/"sung"),"--isolated","--library-exchange-test"],300,e)
+    e=profile("backdrop-pulse-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"backdrop-pulse"))
+    stage("backdrop-pulse",[str(build/"sung"),"--isolated","--backdrop-pulse-test"],240,e)
+    e=profile("playback-memory-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"playback-memory"))
+    stage("playback-memory",[str(build/"sung"),"--isolated","--playback-memory-test"],420,e)
+    for name,flag in [("dynamic-color","--dynamic-color-test"),("navigation-motion","--navigation-motion-test"),
+                      ("artist-hero","--artist-hero-test"),("singalong","--singalong-test"),
+                      ("crossfade-ui","--crossfade-ui-test"),("track-details","--track-details-test"),
+                      ("queue-history","--queue-history-test")]:
+        e=profile(name+"-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/name))
+        stage(name,[str(build/"sung"),"--isolated",flag],300,e)
+    e=profile("interface-audit-profile");e.update(SUNG_HELPER=str(root/"tests/catalog_fixture.py"),SUNG_PYTHON="/usr/bin/python3",SUNG_TEST_OUTPUT=str(out/"interface-audit"))
+    stage("interface-audit",[str(build/"sung"),"--isolated","--interface-audit-test"],300,e)
     if a.offline:
         rows.append(dict(stage='live-ui-and-audit',status='skipped',detail='--offline selected; streaming and live catalog not verified'))
     else:

@@ -9,6 +9,7 @@
 #include <QTimer>
 #include <QTemporaryDir>
 #include <QVariantMap>
+#include <QColor>
 #include <functional>
 #include <memory>
 #include <QMediaDevices>
@@ -85,6 +86,9 @@ class Backend : public QObject {
   Q_PROPERTY(Entries *results READ results CONSTANT)
   Q_PROPERTY(Entries *queue READ queue CONSTANT)
   Q_PROPERTY(CollectionView *collection READ collection CONSTANT)
+  // The songs played before this one, newest first, for the queue panel to
+  // look back over without leaving it.
+  Q_PROPERTY(Entries *recentlyPlayed READ recentlyPlayed CONSTANT)
   Q_PROPERTY(QVariantList audioDevices READ audioDevices NOTIFY audioDevicesChanged)
   Q_PROPERTY(QString audioDeviceId READ audioDeviceId WRITE setAudioDeviceId NOTIFY audioDevicesChanged)
   Q_PROPERTY(QString audioDeviceName READ audioDeviceName NOTIFY audioDevicesChanged)
@@ -112,6 +116,11 @@ class Backend : public QObject {
   Q_PROPERTY(qint64 position READ position NOTIFY positionChanged)
   Q_PROPERTY(qint64 duration READ duration NOTIFY playbackChanged)
   Q_PROPERTY(double volume READ volume WRITE setVolume NOTIFY settingsChanged)
+  Q_PROPERTY(bool volumeNormalization READ volumeNormalization WRITE setVolumeNormalization NOTIFY settingsChanged)
+  Q_PROPERTY(double normalizationGainDb READ normalizationGainDb NOTIFY normalizationChanged)
+  Q_PROPERTY(double trackTrimDb READ trackTrimDb NOTIFY normalizationChanged)
+  Q_PROPERTY(bool resumeLongTracks READ resumeLongTracks WRITE setResumeLongTracks NOTIFY settingsChanged)
+  Q_PROPERTY(QString normalizationSource READ normalizationSource NOTIFY normalizationChanged)
   Q_PROPERTY(double playbackRate READ playbackRate WRITE setPlaybackRate NOTIFY settingsChanged)
   Q_PROPERTY(bool preservePitch READ preservePitch WRITE setPreservePitch NOTIFY settingsChanged)
   Q_PROPERTY(bool pitchAdjustable READ pitchAdjustable CONSTANT)
@@ -137,7 +146,13 @@ class Backend : public QObject {
   Q_PROPERTY(QStringList homeOrder READ homeOrder NOTIFY presentationChanged)
   Q_PROPERTY(QStringList hiddenHomeSections READ hiddenHomeSections NOTIFY presentationChanged)
   Q_PROPERTY(bool artworkAccent READ artworkAccent WRITE setArtworkAccent NOTIFY settingsChanged)
+  Q_PROPERTY(QString accentColor READ accentColor WRITE setAccentColor NOTIFY settingsChanged)
+  Q_PROPERTY(bool ambientBackdrop READ ambientBackdrop WRITE setAmbientBackdrop NOTIFY settingsChanged)
+  Q_PROPERTY(bool backdropPulse READ backdropPulse WRITE setBackdropPulse NOTIFY settingsChanged)
+  Q_PROPERTY(bool typeAheadJump READ typeAheadJump WRITE setTypeAheadJump NOTIFY settingsChanged)
+  Q_PROPERTY(bool onboarded READ onboarded WRITE setOnboarded NOTIFY settingsChanged)
   Q_PROPERTY(QVariantMap albumInfo READ albumInfo NOTIFY catalogChanged)
+  Q_PROPERTY(QVariantMap artistInfo READ artistInfo NOTIFY catalogChanged)
   Q_PROPERTY(QString currentMotionArt READ currentMotionArt NOTIFY onlineArtworkChanged)
   Q_PROPERTY(QString artworkStatus READ artworkStatus NOTIFY onlineArtworkChanged)
   Q_PROPERTY(QString artworkPage READ artworkPage NOTIFY onlineArtworkChanged)
@@ -153,12 +168,16 @@ class Backend : public QObject {
   Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY settingsChanged)
   Q_PROPERTY(bool sleepFade READ sleepFade WRITE setSleepFade NOTIFY settingsChanged)
   Q_PROPERTY(QString sleepStatus READ sleepLabel NOTIFY settingsChanged)
+  Q_PROPERTY(int crossfadeSeconds READ crossfadeSeconds WRITE setCrossfadeSeconds NOTIFY settingsChanged)
+  Q_PROPERTY(bool gapless READ gapless WRITE setGapless NOTIFY settingsChanged)
+  Q_PROPERTY(bool crossfading READ crossfading NOTIFY playbackChanged)
   Q_PROPERTY(bool prepareNext READ prepareNext WRITE setPrepareNext NOTIFY settingsChanged)
   Q_PROPERTY(bool lyricsFallback READ lyricsFallback WRITE setLyricsFallback NOTIFY settingsChanged)
   Q_PROPERTY(QString lyricsSource READ lyricsSource NOTIFY lyricsChanged)
   Q_PROPERTY(QString lyrics READ lyrics NOTIFY lyricsChanged)
   Q_PROPERTY(QVariantList lyricLines READ lyricLines NOTIFY lyricsChanged)
   Q_PROPERTY(int lyricIndex READ lyricIndex NOTIFY lyricIndexChanged)
+  Q_PROPERTY(double lyricProgress READ lyricProgress NOTIFY positionChanged)
   Q_PROPERTY(bool lyricsBusy READ lyricsBusy NOTIFY lyricsChanged)
   Q_PROPERTY(QVariantList playlists READ playlists NOTIFY libraryChanged)
   Q_PROPERTY(QVariantList pins READ pins NOTIFY libraryChanged)
@@ -196,6 +215,8 @@ public:
   Q_INVOKABLE QString importMusicFolderPath(const QString &input);
   Q_INVOKABLE void rescanMusicFolders();
   Q_INVOKABLE void forgetMusicFolder(const QString &path);
+  Q_INVOKABLE void exportPlaylistM3u(const QString &id,const QUrl &file);
+  Q_INVOKABLE void importPlaylistM3u(const QUrl &file);
   Q_INVOKABLE void inspectPlaylist(const QString &id);
   Q_INVOKABLE void applyPlaylistCleanup(bool duplicates,bool missing);
   Q_INVOKABLE void closePlaylistCleanup();
@@ -211,6 +232,7 @@ public:
   Entries *results() { return &m_results; }
   Entries *queue() { return &m_queue; }
   CollectionView *collection() { return &m_collection; }
+  Entries *recentlyPlayed() { return &m_recent; }
   QVariantList audioDevices() const;
   QString audioDeviceId() const {return m_settings.value("audioDevice").toString();}
   QString audioDeviceName() const;
@@ -237,22 +259,36 @@ public:
   QVariantMap current() const { return m_queue.get(m_index); }
   int currentIndex() const { return m_index; }
   bool playing() const {
-    return m_media.playbackState() == QMediaPlayer::PlayingState;
+    return m_media().playbackState() == QMediaPlayer::PlayingState;
   }
   QString coverPlayId() const { return m_coverPlayId; }
   bool resolving() const { return m_resolving; }
-  bool buffering() const { return m_wantPlay && (m_resolving || m_media.mediaStatus()==QMediaPlayer::LoadingMedia || m_media.mediaStatus()==QMediaPlayer::StalledMedia || m_media.mediaStatus()==QMediaPlayer::BufferingMedia); }
-  qint64 position() const { return m_media.source().isEmpty() ? m_savedPosition : m_media.position(); }
+  bool buffering() const { return m_wantPlay && (m_resolving || m_media().mediaStatus()==QMediaPlayer::LoadingMedia || m_media().mediaStatus()==QMediaPlayer::StalledMedia || m_media().mediaStatus()==QMediaPlayer::BufferingMedia); }
+  qint64 position() const { return m_media().source().isEmpty() ? m_savedPosition : m_media().position(); }
   qint64 duration() const {
-    return m_media.duration() > 0
-               ? m_media.duration()
+    return m_media().duration() > 0
+               ? m_media().duration()
                : current().value("seconds").toLongLong() * 1000;
   }
   double volume() const { return m_userVolume; }
+  bool volumeNormalization() const {return m_settings.value("volumeNormalization",false).toBool();}
+  void setVolumeNormalization(bool);
+  double normalizationGainDb() const {return m_normalizationDb;}
+  // The level actually handed to the mixer, after levelling and sleep fade.
+  double effectiveVolume() const {return settledVolume();}
+  QString normalizationSource() const {return m_normalizationSource;}
+  Q_INVOKABLE double measuredLoudness(const QString &id) const;
+  double trackTrimDb() const {return m_trim;}
+  // A correction the listener sets by hand, kept alongside any automatic one.
+  Q_INVOKABLE double trackTrim(const QString &id) const;
+  Q_INVOKABLE void setTrackTrim(const QString &id,double decibels);
+  bool resumeLongTracks() const {return m_settings.value("resumeLongTracks",true).toBool();}
+  void setResumeLongTracks(bool enabled);
+  Q_INVOKABLE qint64 resumePosition(const QString &id) const;
   bool sleepFade() const { return m_settings.value("sleepFade",true).toBool(); }
   void setSleepFade(bool enabled);
   void setVolume(double);
-  double playbackRate() const {return m_media.playbackRate();}
+  double playbackRate() const {return m_media().playbackRate();}
   void setPlaybackRate(double rate);
   bool pitchAdjustable() const;
   bool preservePitch() const;
@@ -302,8 +338,23 @@ public:
   Q_INVOKABLE bool artworkFits(const QVariantMap &track) const;
   bool currentArtworkFit() const {return artworkFits(current());}
   void setCurrentArtworkFit(bool enabled);
+  // Material derives every color role from one source color. The result only
+  // changes when that color or the theme does, so it is worth remembering.
+  Q_INVOKABLE QVariantMap colorScheme(const QColor &source,bool dark) const;
   bool artworkAccent() const {return m_settings.value("artworkAccent",false).toBool();}
   void setArtworkAccent(bool enabled) {if(artworkAccent()==enabled)return;m_settings.setValue("artworkAccent",enabled);emit settingsChanged();}
+  // A hand-picked Material source color. Empty keeps the built-in palette.
+  QString accentColor() const {return m_settings.value("accentColor").toString();}
+  void setAccentColor(const QString &value);
+  bool ambientBackdrop() const {return m_settings.value("ambientBackdrop",true).toBool();}
+  void setAmbientBackdrop(bool enabled) {if(ambientBackdrop()==enabled)return;m_settings.setValue("ambientBackdrop",enabled);emit settingsChanged();}
+  // First run shows a short setup flow; isolated sessions never do.
+  bool onboarded() const {return m_settings.value("onboarded",false).toBool();}
+  void setOnboarded(bool done) {if(onboarded()==done)return;m_settings.setValue("onboarded",done);emit settingsChanged();}
+  bool backdropPulse() const {return m_settings.value("backdropPulse",true).toBool();}
+  void setBackdropPulse(bool enabled) {if(backdropPulse()==enabled)return;m_settings.setValue("backdropPulse",enabled);emit settingsChanged();}
+  bool typeAheadJump() const {return m_settings.value("typeAheadJump",true).toBool();}
+  void setTypeAheadJump(bool enabled) {if(typeAheadJump()==enabled)return;m_settings.setValue("typeAheadJump",enabled);emit settingsChanged();}
   Q_INVOKABLE QString preparePlaylistCover(const QUrl &url);
   Q_INVOKABLE bool setPlaylistCover(const QString &id,const QString &preview,double x=0.5,double y=0.5,double zoom=1);
   Q_INVOKABLE void resetPlaylistCover(const QString &id);
@@ -312,6 +363,7 @@ public:
   void openLocalGroup(const QVariantMap &item);
   void updateLocalView();
   QVariantMap albumInfo() const;
+  QVariantMap artistInfo() const;
   QString currentMotionArt() const;
   QString artworkStatus() const;
   QString artworkPage() const { return m_artworkPage; }
@@ -340,6 +392,12 @@ public:
   QString theme() const { return m_settings.value("theme", "system").toString(); }
   void setTheme(const QString &);
   QString cookies() const { return m_settings.value("cookies").toString(); }
+  // Overlap between one song and the next, in seconds. Zero plays them in turn.
+  int crossfadeSeconds() const {return qBound(0,m_settings.value("crossfadeSeconds",0).toInt(),12);}
+  void setCrossfadeSeconds(int seconds);
+  // Without an overlap, the next song still starts the instant this one ends.
+  bool gapless() const {return m_settings.value("gapless",true).toBool();}
+  void setGapless(bool enabled);
   bool prepareNext() const {return m_settings.value("prepareNext",true).toBool();}
   void setPrepareNext(bool enabled);
   bool lyricsFallback() const {return m_settings.value("lyricsFallback",true).toBool();}
@@ -351,6 +409,7 @@ public:
   QString lyrics() const { return m_lyrics; }
   QVariantList lyricLines() const { return m_lyricLines; }
   int lyricIndex() const;
+  double lyricProgress() const;
   bool lyricsBusy() const { return m_lyricsBusy; }
   QVariantList playlists() const;
   QVariantList pins() const;
@@ -432,7 +491,7 @@ public:
   void localTestSource(const QUrl &url);
   bool stopped() const { return m_stopped; }
   QString trackToken() const { return QString::number(m_trackToken); }
-  QMediaPlayer *media() { return &m_media; }
+  QMediaPlayer *media() { return &m_media(); }
 signals:
   void onlineArtworkChanged();
   void viewAboutToChange();
@@ -444,6 +503,7 @@ signals:
   void trackChanged();
   void playbackChanged();
   void audioLevelsChanged();
+  void normalizationChanged();
   void positionChanged();
   void lyricIndexChanged();
   void settingsChanged();
@@ -473,6 +533,7 @@ private:
   bool m_onlineArtworkAttempted=false;
   int m_onlineArtworkRetries=0;
   friend class BackendTest;
+  friend class CrossfadeTest;
   friend class SubsonicTest;
   void serverBrowseRequest(QVariantMap request,bool push=true,bool append=false);
   void setupServer();
@@ -545,7 +606,10 @@ private:
   CollectionView m_collection;
   QMediaDevices m_devices;
   QVariantList m_lyricLines;
+  mutable QHash<QPair<QRgb,bool>,QVariantMap> m_schemes;
   QVariantList m_sections, m_favorites, m_history, m_playlists, m_back, m_pins;
+  Entries m_recent;
+  void refreshRecentlyPlayed();
   int m_playbackDirection=1;
   QString m_viewKey = "home";
   QMap<QString,QVariantMap> m_viewOptions;
@@ -582,12 +646,68 @@ private:
   QVariantList m_audioLevels{0.0,0.0,0.0,0.0,0.0};
   QElapsedTimer m_levelPublish;
   QTimer m_levelIdle;
-  QAudioOutput m_audio;
-  QAudioBufferOutput m_visualAudio;
-  QMediaPlayer m_media;
+  // Playback runs on two interchangeable decks. One carries the song being
+  // heard; the other holds the next one, already decoded and waiting. During a
+  // crossfade both sound at once while their volumes trade places, and at the
+  // end the decks swap roles. Nothing is handed from one to the other mid-song,
+  // so neither side has a seam to hear.
+  QAudioOutput m_audioA, m_audioB;
+  QAudioBufferOutput m_visualA, m_visualB;
+  QMediaPlayer m_deckA, m_deckB;
+  bool m_usingB = false;
+  QMediaPlayer &m_media() { return m_usingB ? m_deckB : m_deckA; }
+  const QMediaPlayer &m_media() const { return m_usingB ? m_deckB : m_deckA; }
+  QMediaPlayer &spareDeck() { return m_usingB ? m_deckA : m_deckB; }
+  bool isActive(const QMediaPlayer &deck) const { return &deck == &m_media(); }
+public:
+  bool crossfading() const { return m_crossfading; }
+private:
+  QAudioOutput &activeAudio() { return m_usingB ? m_audioB : m_audioA; }
+  const QAudioOutput &activeAudio() const { return m_usingB ? m_audioB : m_audioA; }
+  QAudioOutput &spareAudio() { return m_usingB ? m_audioA : m_audioB; }
+  // The volume the mixer is asked for once nothing is fading.
+  double settledVolume() const { return qBound(0.0, m_userVolume * m_sleepGain * m_normalizationGain, 1.0); }
+  void swapDecks();
+  // Crossfade state. m_fadeGain scales the active deck while a fade runs.
+  QTimer m_crossfadeWatch, m_crossfadeTick;
+  QElapsedTimer m_crossfadeClock;
+  bool m_crossfading = false;
+  int m_crossfadeMs = 0;
+  double m_fadeGain = 1.0;
+  quint64 m_crossfadeToken = 0;
+  void considerCrossfade();
+  void beginCrossfade(int milliseconds);
+  void stepCrossfade();
+  void endCrossfade(bool completed);
+  void clearSpare();
+  // The queue position the spare deck is holding, or -1 when it holds nothing.
+  int m_handoffIndex = -1;
+  bool m_handoffPrepared = false;
+  int handoffTarget();
+  QUrl readySource(const QVariantMap &track) const;
+  bool armHandoff(bool playImmediately);
+  void adoptHandoff(int index);
+  bool finishGapless();
   QTimer m_saveTimer, m_sleepTimer, m_sleepTick, m_sleepFadeStart, m_sleepFadeTick;
-  double m_userVolume=0.65, m_sleepGain=1.0;
+  double m_userVolume=0.65, m_sleepGain=1.0, m_normalizationGain=1.0, m_normalizationDb=0.0, m_trim=0.0;
+  bool m_sleepAtQueueEnd=false;
+  QString m_normalizationSource;
+  LoudnessMeter m_loudness;
+  QString m_loudnessTrack;
+  // A playlist file waiting for its songs to finish importing.
+  QString m_m3uName;
+  QStringList m_m3uPaths;
+  void finishM3uImport();
   void updateSleepGain();
+  void applyOutputVolume();
+  void updateNormalization();
+  void storeMeasuredLoudness();
+  // Settings-backed caches keyed by track, oldest entry dropped first.
+  void rememberBounded(const QString &prefix,const QString &id,const QVariant &value,int limit);
+  void storeResumePosition();
+  void clearResumePosition(const QString &id);
+  static bool longRecording(const QVariantMap &track);
+  static double trackGainDb(const QVariantMap &track);
   QHash<QString, QProcess *> m_processes;
   QHash<QString, QVariantMap> m_streams;
   qint64 m_restorePosition = 0, m_savedPosition = 0;

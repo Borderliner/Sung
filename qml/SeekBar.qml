@@ -35,6 +35,21 @@ Slider {
     ToolTip {visible:s.volumeMode&&s.hovered;text:Math.round(app.volume*100)+"%";delay:180}
     hoverEnabled: true
     HoverHandler { id: seekHover }
+    // Seeking by wheel goes straight to playback: assigning the slider's value
+    // here would replace the binding that keeps it following the track.
+    WheelHandler {
+        enabled: !s.volumeMode && s.enabled && app.duration>0
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+        property real carried: 0
+        onWheel: event=>{
+            const ticks=(event.angleDelta.y||event.angleDelta.x)/120;
+            carried+=ticks;
+            const whole=carried>0?Math.floor(carried):Math.ceil(carried);
+            if(!whole)return;
+            carried-=whole;
+            app.seek(Math.max(0,Math.min(app.duration,app.position+whole*5000)));
+        }
+    }
     readonly property real previewValue: (interacting || (visualFocus && !seekHover.hovered)) ? value : from+(to-from)*Math.max(0,Math.min(1,(seekHover.point.position.x-leftPadding-thumbWidth/2)/Math.max(1,availableWidth-thumbWidth)))
     readonly property string previewLine: {app.lyricLines;app.lyricOffset;return !volumeMode && (seekHover.hovered || interacting || visualFocus)?app.previewLyric(previewValue):"";}
     ToolTip {

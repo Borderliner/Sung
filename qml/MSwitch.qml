@@ -3,6 +3,10 @@ import QtQuick.Controls
 Switch {
     id: control
     implicitHeight: Math.max(48, label.implicitHeight+16)
+    // A settings row anchors its label and its control to the same edges as
+    // the rows around it, so a column of switches and value controls lines up.
+    leftPadding: 0
+    rightPadding: 0
     hoverEnabled: true
     opacity: enabled ? 1 : 0.38
     indicator: Rectangle {

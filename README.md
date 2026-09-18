@@ -27,9 +27,10 @@ A minimal Material 3 player built with C++ and Qt Quick, designed for CachyOS an
 - **Jellyfin** — browse music libraries, albums, artists and genres; search, stream original or transcoded audio, manage permitted server playlists, sync favorites and display synchronized lyrics.
 - **Your music** — import FLAC, MP3 and other supported audio files or folders; browse albums and artists, search paths and group songs by folder. Mix local and YouTube songs in the same playlists.
 - **Animated artwork** — local animated covers and automatic online covers for matching YouTube songs, shared across the player, immersive view and mini player; lists use still covers.
+- **Appearance** — light and dark themes, a pickable Material accent color, artwork-derived color, an ambient cover backdrop, an expandable navigation rail, density and per-view layouts.
 - **Lyrics** — synchronized lyrics, an immersive view, timing adjustments, LRC import, seek previews and search with jump-to-line playback.
-- **Library tools** — likes, listening history, smart mixes, custom smart playlists, custom playlist covers, playlist cleanup, multi-selection, drag reordering and Undo.
-- **Playback controls** — mini player, queue editing with source headings, shuffle, repeat, sleep timer, playback speed and audio-device selection.
+- **Library tools** — likes, listening history, smart mixes, custom smart playlists, M3U playlist import and export, custom playlist covers, playlist cleanup, multi-selection, drag reordering and Undo.
+- **Playback controls** — mini player, queue editing with source headings, an immersive up-next carousel, volume normalization, shuffle, repeat, sleep timer, playback speed and audio-device selection.
 - **Desktop integration** — media keys through MPRIS, optional notifications, light/dark themes and Noctalia palette support.
 
 Native rendering and bounded artwork caches keep Sung lightweight. Animated covers share one additional decoder, released when the player is hidden. Animations can be disabled in Settings.
@@ -74,13 +75,21 @@ Search for music or paste a YouTube song or playlist link. Use **Library → Loc
 
 In **Local files**, open **Find and sort songs → Folder** to group songs by their parent directory, with natural filename order inside each group. The filter also searches folder paths.
 
-Create an automatic playlist from **Library → Playlists → Smart playlist**. Combine artist, title, source, liked status and last-played rules over your saved music. Use **Edit rules** to change it; matching songs update automatically.
+With a song list focused, start typing to jump to the first matching title, or artist when no title matches. The search refines as you type and clears after a short pause. Turn it off with **Settings → Library → Type to jump in lists**.
+
+Create an automatic playlist from **Library → Playlists → Smart playlist**. Combine artist, title, album, release-year range, length range, source, liked status and last-played rules over your saved music. A year or length rule skips songs with no year or duration, and a range that ends before it starts drops its upper bound. Use **Edit rules** to change it; matching songs update automatically.
 
 **Local files → Albums / Artists** groups imported music by its tags. Albums use album-artist tags when present, with disc and track order preserved. Use **Rescan** after upgrading to refresh tags on existing imports. Folder-sorted songs and multi-disc albums have collapsible group headings with track counts and group-play buttons. Collapsed songs stay in the collection but are excluded from selection.
+
+**Library → Playlists → Import M3U** reads an `.m3u` or `.m3u8` file, imports the audio it names and saves it as a playlist. Relative entries resolve against the playlist file’s own folder. A playlist’s menu offers **Export as M3U…** in return. Only local files can travel this way: streaming ids mean nothing to other players, and server URLs would carry credentials that library exports deliberately leave out, so those songs are skipped and counted.
 
 In a playlist’s menu, choose **Change cover…** to crop a PNG, JPEG or WebP. Sung saves a 512px copy; the original stays untouched. **Restore cover collage** returns to automatic artwork.
 
 ### Artwork and appearance
+
+The navigation rail on the left can expand. Use the menu button at its top to switch between icons and a wider list that also shows your pinned collections. The choice is remembered, and windows narrower than 1080px stay collapsed because the expanded rail sits beside the content rather than over it.
+
+On first run Sung offers a three-step setup: theme and accent color, a music folder, and the page to open on. Every step can be skipped, and each control also lives in Settings.
 
 Open **Home → Customize Home** to reorder or hide sections; **Reset layout** restores them. **Settings → Library → Start page** chooses Home, Local, Server or Liked for future launches. Direct launch links still take priority.
 
@@ -96,6 +105,10 @@ Open **Settings → Appearance → Current artwork** to preview the current cove
 
 **Settings → Appearance → Use artwork accent** colors controls from the current cover. It is off by default; desktop surfaces and Noctalia integration are preserved. Monochrome or missing covers use the normal theme.
 
+**Settings → Appearance → Accent color** picks a Material source color for buttons, highlights and progress. Sung solves each seed against the current surfaces, so the resulting color always clears 4.5:1 contrast in both themes. **Default** restores the built-in palette. Artwork accent takes priority while it is on.
+
+**Settings → Appearance → Ambient artwork backdrop** draws the current cover, softened and dimmed, behind Home, the immersive player and the Now playing panel. Home has no cover of its own, so it borrows the playing track’s, or the first artwork on its shelves when nothing is playing. It is on by default. The cover is decoded small and blurred once when it loads, so the wash costs one small texture and no per-frame effect, and a scrim keeps text contrast unchanged. In the immersive player the backdrop drifts slowly and, with **Backdrop follows the music**, swells gently with the decoded low end of the track; it holds still on rounded surfaces such as Home and the Now playing panel, because swelling there would square off their corners. Everything stops when **Animations** is off. Hiding either surface releases the decoded cover.
+
 The artwork controls also offer **Fit / Fill**, remembered per album where album metadata is available, otherwise per song. Immersive artwork requests a display-sized still cover up to 1600px; source quality remains the limit. Artwork accents transition smoothly when animations are enabled. Next and Previous move song information in opposite directions. Player covers crossfade between songs; transitions stop when hidden or animations are disabled.
 
 Click album or immersive artwork to inspect the full cover. Use the wheel or + / − to zoom, 0 to reset, and Escape to close. The viewer uses available source detail, capped at 1600px. You can also click the preview in **Current artwork**.
@@ -104,11 +117,19 @@ Click album or immersive artwork to inspect the full cover. Use the wheel or + /
 
 Press **F11** for immersive playback. The **…** menu selects Artwork, Lyrics or Split; **Ctrl+L** opens the queue. Optional **Auto-hide controls** fades controls while idle; pointer or keyboard activity restores them. The cursor stays visible. Click an available artist or album name to browse, then use Back to return.
 
+The same **…** menu offers **Up next covers**: a carousel of the queue below the player, with the playing track centered and large and the rest peeking either side. Scrolling snaps to a cover and plays it as soon as it settles; clicking a cover plays it directly. The choice is remembered. **Show all** opens the full queue for anything the strip cannot reach. The carousel shrinks the main cover to make room, so it is off by default.
+
+The sleep timer can stop at the **end of the queue** as well as after a set time or the current track. It is offered only when the queue can actually finish, so it is unavailable while shuffle or repeat is on.
+
+**Settings → Playback → Resume long recordings** returns to where you left a recording of 20 minutes or more — mixes, sets and live shows. The mark is written when you pause or move on, dropped once the recording finishes or if you stop near either end, and up to 400 are kept locally.
+
+A song’s menu offers **Adjust volume…** to trim that one song by up to 12 dB. The trim is kept for that song, applies whether or not volume normalization is on, and appears in **Track details**.
+
 **Settings → Playback → Fade out before sleep** lowers the audio over the last 30 seconds of a timed or end-of-track sleep timer. Your chosen volume stays saved and is restored when the timer ends or is cancelled.
 
 Queue headings distinguish songs added manually, collection tracks and autoplay recommendations when their origin is known. These labels preserve playback order, including after dragging songs. Older queues without origin information retain source headings.
 
-Hold **Shift while dragging the seek bar** for fine seeking; the new position applies when you release. **Shift+Left / Right** seeks by 100ms. Escape cancels a fine drag.
+Hold **Shift while dragging the seek bar** for fine seeking; the new position applies when you release. **Shift+Left / Right** seeks by 100ms. Escape cancels a fine drag. The mouse wheel over the seek bar moves playback in five-second steps. **0**–**9** jump to that tenth of the track, with the same on-screen feedback as the other seek shortcuts; they are ignored while you are typing or while a song list has the keyboard.
 
 Click the volume icon for a slider and an exact percentage. Enter a value from 0 to 100 and press Enter or Apply. This works in the main, mini and immersive players. In the main and immersive players, **Ctrl+Up / Down** adjusts volume and **M** toggles mute; shortcuts show brief playback feedback.
 
@@ -123,6 +144,8 @@ Press **Ctrl+Shift+P** for quick actions, saved playlists and audio outputs. Typ
 **Listening sessions** in Settings or Quick Actions save your queue, song position, speed, shuffle, repeat and autoplay settings. Resume asks before replacing the current queue. Sessions can be renamed, updated or deleted; up to 20 sessions of 2,000 songs each are kept locally.
 
 The arrow beside the player’s volume controls opens an audio-output picker. It remains available in narrow windows.
+
+**Settings → Playback → Volume normalization** evens out loudness between recordings. ReplayGain and R128 tags are read when a file is imported; everything else, including YouTube and server audio, is measured from the decoded stream and levelled from the next play onward. Recordings shorter than 45 seconds of playback are never treated as measured. Gain is limited to -15 dB and +6 dB, and the mixer cannot amplify past full scale, so a quiet track is only lifted while your own volume leaves headroom. Your chosen volume is never rewritten, and **Track details** shows the correction in use. Up to 2,000 measurements are kept locally. Existing imports need a rescan to pick up their tags.
 
 **Pause when audio output disconnects** is optional. Sung pauses when the selected device disappears; wired headphone-port detection uses `pactl` from `libpulse`. Reconnecting does not automatically resume playback.
 
@@ -141,6 +164,7 @@ Open a song’s menu to queue it, like it or add it to a playlist. Local playlis
 | ? / F1 | Keyboard shortcut reference (outside text fields) |
 | Ctrl+M | Toggle mini player |
 | F11 | Toggle immersive player |
+| 0 – 9 | Jump to that tenth of the track |
 | Ctrl+A | Select songs in the focused list |
 | Escape | Close the current view or clear selection |
 
