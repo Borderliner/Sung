@@ -34,6 +34,7 @@
 !/assets/readme-banner.png
 !/assets/sung.png
 !/assets/sung.desktop
+!/assets/io.github.yappologistic.Sung.metainfo.xml
 !/assets/icons/
 /assets/icons/*
 !/assets/icons/*.svg
@@ -44,6 +45,7 @@
 /packaging/*/*
 !/packaging/*/*.sh
 !/packaging/*/*.in
+!/packaging/*/*.yml
 !/packaging/debian/control
 !/packaging/debian/copyright
 !/packaging/debian/rules
