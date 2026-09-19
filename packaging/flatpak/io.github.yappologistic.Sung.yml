@@ -49,6 +49,10 @@ modules:
       - -DCMAKE_BUILD_TYPE=Release
       - -DBUILD_TESTING=OFF
       - -DSUNG_DIAGNOSTICS=OFF
+      # Flatpak exports the desktop entry under the application id, and Qt
+      # takes the Wayland app id from the entry name the binary reports, so
+      # the two have to agree or the window will not match its launcher.
+      - -DSUNG_DESKTOP_ID=io.github.yappologistic.Sung
     sources:
       # The build runs against an extracted release tarball, so this is the
       # same tracked-files-only tree the other four packages are built from.

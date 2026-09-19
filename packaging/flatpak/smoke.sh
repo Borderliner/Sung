@@ -32,6 +32,14 @@ do
   if [ -f "$file" ]; then pass "$file"; else fail "$file"; fi
 done
 
+# Qt reports this as the Wayland app id. It has to be the desktop entry's
+# base name, which Flatpak requires to be the application id.
+if grep -aqF "$appid" /app/bin/sung 2>/dev/null; then
+  pass 'binary reports the application id as its desktop entry'
+else
+  fail 'binary reports the application id as its desktop entry'
+fi
+
 # The runtime's own interpreter, reaching the modules through PYTHONPATH.
 if python3 -c 'import yt_dlp, ytmusicapi' >/dev/null 2>&1; then
   pass 'runtime python imports yt_dlp and ytmusicapi'
