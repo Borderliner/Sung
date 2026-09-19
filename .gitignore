@@ -12,6 +12,8 @@
 !/tests/
 !/assets/
 !/licenses/
+!/packaging/
+!/.github/
 
 /src/*
 !/src/*.cpp
@@ -37,6 +39,21 @@
 !/assets/icons/*.svg
 /licenses/*
 !/licenses/MaterialSymbols-LICENSE.txt
+/packaging/*
+!/packaging/*/
+/packaging/*/*
+!/packaging/*/*.sh
+!/packaging/*/*.in
+!/packaging/debian/control
+!/packaging/debian/copyright
+!/packaging/debian/rules
+!/packaging/debian/source/
+/packaging/debian/source/*
+!/packaging/debian/source/format
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/*.yml
 
 # Private state, credentials, build products and editor/assistant files.
 **/__pycache__/
