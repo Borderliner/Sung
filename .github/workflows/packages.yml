@@ -40,6 +40,12 @@ jobs:
           - distro: void
             image: ghcr.io/void-linux/void-linux:latest-full-x86_64
             shell: sh
+          # Not a distribution package: bubblewrap has to build its sandbox
+          # inside the container, which is what the extra privilege is for.
+          - distro: flatpak
+            image: fedora:42
+            shell: bash
+            docker_args: --privileged
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +70,7 @@ jobs:
 
       - name: Build the ${{ matrix.distro }} package
         run: |
-          $DOCKER_RUN ${{ matrix.image }} ${{ matrix.shell }} \
+          $DOCKER_RUN ${{ matrix.docker_args }} ${{ matrix.image }} ${{ matrix.shell }} \
             packaging/${{ matrix.distro }}/build.sh \
             /src/dist/sung-${{ steps.tarball.outputs.version }}.tar.gz \
             /src/dist/${{ matrix.distro }}
@@ -74,7 +80,7 @@ jobs:
       # modules, ffmpeg and node in. A missing one fails here.
       - name: Install and smoke-test the package
         run: |
-          $DOCKER_RUN ${{ matrix.image }} ${{ matrix.shell }} \
+          $DOCKER_RUN ${{ matrix.docker_args }} ${{ matrix.image }} ${{ matrix.shell }} \
             packaging/${{ matrix.distro }}/verify.sh \
             /src/dist/${{ matrix.distro }} \
             ${{ steps.tarball.outputs.version }}
